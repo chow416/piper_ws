@@ -1,0 +1,38 @@
+# =============================================================================
+#  GPU 透传 overlay —— 叠加在基础 compose 之上
+#
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
+#
+#  为什么需要单独一份：
+#    容器共享宿主内核，但用户态是独立的 —— 容器内用哪个 Mesa 由镜像决定。
+#    ubuntu:22.04 自带 Mesa 22.0.1（2022 年 4 月），不认识 2024 年之后的新款
+#    Intel 核显（如本机的 Arrow Lake-P，PCI ID 8086:7d51），于是会静默退回
+#    llvmpipe 纯 CPU 软件渲染：功能正常，但 RViz / Gazebo 帧率明显偏低。
+#
+#  这份 overlay 做两件事：
+#    1) 把宿主的 /dev/dri 透传进容器
+#    2) 构建时加入 kisak/kisak-mesa PPA，把容器内 Mesa 升到 25.x
+#
+#  不需要硬件加速（或宿主本来就是无显卡的服务器）时，不要用这份文件。
+# =============================================================================
+services:
+  piper:
+    build:
+      args:
+        # 默认开。若宿主 GPU 较老（Mesa 22 就能驱动），设 ENABLE_MESA_PPA=0 跳过 PPA
+        ENABLE_MESA_PPA: "${ENABLE_MESA_PPA:-1}"
+
+    # 透传渲染节点。若只想给 render 节点、不想给整个 /dev/dri：
+    #   - /dev/dri/renderD128:/dev/dri/renderD128
+    devices:
+      - /dev/dri:/dev/dri
+
+    # 让容器内普通用户有权限打开 /dev/dri/*（这两个组的 GID 由宿主的设备决定，
+    # Docker 会按宿主的组名解析）
+    group_add:
+      - video
+      - render
+
+    environment:
+      # 别强制软件渲染
+      LIBGL_ALWAYS_SOFTWARE: "0"

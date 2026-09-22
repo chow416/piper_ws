@@ -1,0 +1,31 @@
+# ROS/colcon outputs
+build/
+install/
+log/
+docker/build/
+docker/install/
+docker/log/
+
+# Local runtime configuration
+docker/.env
+.env
+.codex/
+.agents/
+
+# Generated perception datasets and model artifacts
+data/
+models/
+*.pt
+*.pth
+
+# Captured/debug images
+wrist_depth.png
+wrist_rgb.png
+button_colors_rgb.png
+
+# Python/editor caches
+**/__pycache__/
+**/.pytest_cache/
+*.py[cod]
+.vscode/
+.idea/

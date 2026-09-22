@@ -1,0 +1,9 @@
+[submodule "src/Piper_ros"]
+	path = src/Piper_ros
+	url = https://github.com/agilexrobotics/Piper_ros.git
+[submodule "src/third_party/moveit_task_constructor"]
+	path = src/third_party/moveit_task_constructor
+	url = https://github.com/moveit/moveit_task_constructor.git
+[submodule "src/third_party/py_binding_tools"]
+	path = src/third_party/py_binding_tools
+	url = https://github.com/ros-planning/py_binding_tools.git

@@ -1,0 +1,10 @@
+# 日常规控/回归测试的 Gazebo 无界面覆盖配置。
+# 保留 DISPLAY，因此 RViz 仍可显示机械臂、规划轨迹和 TF。
+# 用法：
+#   docker compose -f docker-compose.yml -f docker-compose.headless.yml up -d
+# 需要 RViz 或 Gazebo GUI 时，改回只使用 docker-compose.yml。
+services:
+  piper:
+    environment:
+      ALSOFT_DRIVERS: "null"
+      LIBGL_ALWAYS_SOFTWARE: "1"

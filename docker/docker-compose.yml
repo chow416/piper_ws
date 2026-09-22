@@ -1,0 +1,66 @@
+# =============================================================================
+#  PiPER 开发容器 —— 基础版
+#  这份文件在任何 Linux 上都能跑（不需要 GPU 透传，走软件渲染）。
+#  想让容器用上显卡，叠加 gpu overlay：
+#     docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# =============================================================================
+name: piper-dev
+
+services:
+  piper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 换源参数：海外同事改成官方源即可，见 Dockerfile 头部注释
+        UBUNTU_MIRROR: "${UBUNTU_MIRROR:-mirrors.tuna.tsinghua.edu.cn}"
+        ROS2_MIRROR: "${ROS2_MIRROR:-mirrors.tuna.tsinghua.edu.cn/ros2/ubuntu}"
+        ROSDISTRO_MIRROR: "${ROSDISTRO_MIRROR:-mirrors.tuna.tsinghua.edu.cn/rosdistro}"
+        PIP_INDEX: "${PIP_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
+        ENABLE_MESA_PPA: "${ENABLE_MESA_PPA:-0}"
+        USER_UID: "${USER_UID:-1000}"
+        USER_GID: "${USER_GID:-1000}"
+    image: piper-dev:humble
+    container_name: piper_dev
+    hostname: piper-dev
+
+    # ROS 2 的 DDS 发现依赖组播。宿主网络模式下，容器、宿主上的其它节点、
+    # 以及同网段的其他机器可以互相看见 —— 联调时最省事。
+    network_mode: host
+    ipc: host
+
+    stdin_open: true
+    tty: true
+    init: true
+    working_dir: /ws
+    command: bash
+
+    environment:
+      DISPLAY: "${DISPLAY:-:0}"
+      # 通过宿主的 Xauthority cookie 访问 XWayland；比 `xhost +` 更安全。
+      # 未处于桌面会话时挂载 /dev/null，容器仍可用于无界面仿真。
+      XAUTHORITY: /tmp/.Xauthority
+      QT_X11_NO_MITSHM: "1"
+      # 想让渲染强制走 CPU 软件光栅（排查显卡问题时用）时设为 1
+      LIBGL_ALWAYS_SOFTWARE: "${LIBGL_ALWAYS_SOFTWARE:-0}"
+      ROS_DOMAIN_ID: "${ROS_DOMAIN_ID:-0}"
+      RMW_IMPLEMENTATION: "${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+      PIPER_QUIET: "${PIPER_QUIET:-0}"
+
+    volumes:
+      # X11：容器里的 RViz / Gazebo 画到宿主的 X server（Wayland 走 XWayland 亦可）
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ${XAUTHORITY:-/dev/null}:/tmp/.Xauthority:ro
+      # 工作区：宿主上编辑，容器里编译运行
+      - ..:/ws
+      # 可选：把额外的环境变量文件挂进来，改完重启容器即可生效，无需重建镜像
+      - ./piper_env.sh:/etc/piper_env.sh:ro
+
+    # 下面的设备透传默认注释掉，需要时按需放开（见 README 第 4 节）
+    #   USB-CAN 适配器（如 CANable / 广成 USBCAN）：
+    # devices:
+    #   - /dev/ttyACM0:/dev/ttyACM0
+    #   SocketCAN / 需要直接操作网卡时，改用 privileged：
+    # privileged: true
+
+    restart: "no"
