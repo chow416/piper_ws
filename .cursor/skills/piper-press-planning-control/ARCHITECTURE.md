@@ -169,7 +169,14 @@ Current packages:
 - `piper_description`: robot and press-tool geometry only.
 - `piper_gazebo`: simulation plant, scene, simulated sensors/controllers.
 - `piper_press_moveit`: five-axis MoveIt configuration only.
-- `piper_elevator_manipulation`: current planning algorithm and MTC integration baseline.
+- `piper_elevator_manipulation`: five-axis planning and press-task execution.
+  Its `go_home.py` sends a trajectory to a configured staging pose through the
+  active controller; this is not a factory encoder-zero operation.
+- `piper_hardware`: the active real-arm ros2_control SystemInterface. It reads
+  six-joint CAN feedback, exposes J1–J5 to `arm_controller`, holds the measured
+  J6 angle in the six-field packet, and writes CAN mode and joint targets each
+  controller cycle. Motor enable is opt-in at launch. The command buffer is
+  seeded from measured feedback, and stale feedback fails the interface.
 
 Target evolution:
 
@@ -207,10 +214,19 @@ The planning package must not depend on perception implementations. The executio
 
 The current integrated demo proves that the five-axis model, custom 5D IK, MTC, MoveIt controller mapping, and Gazebo execution are connected. It is not yet the final architecture:
 
-- free motion currently calls sampling planning directly instead of first using prerecorded routes;
-- contact approach currently uses short joint-interpolated waypoint motions instead of a true panel-normal Cartesian planner;
-- press completion currently uses configured travel depth instead of contact detection;
+- free motion now tries the configured, collision-checked prerecorded joint
+  route first and falls back to OMPL when the route is invalid or blocked;
+  route selection and start-state tolerance still need broader scenario tests;
+- the simulation now samples and collision-checks a 5D panel-normal Cartesian
+  line for approach, press, and retreat; broader scene and singularity tests
+  remain necessary;
+- the simulation cancels on a stable virtual-plane contact signal and replans
+  retreat from the actual stopped state. The real-arm profile has been tested
+  with a configured fixed-travel cap, but it has **no validated real contact
+  sensor**; fixed-travel completion must not be described as confirmed contact;
 - orchestration is still a sequential MTC demo rather than a BehaviorTree.CPP action server;
-- the simulator button/contact signal is not yet exposed through the future contact-monitor interface.
+- no validated hardware contact adapter or full real-arm safety qualification
+  exists yet; retain the hardware profile's explicit enable/execute gates.
 
-Address these gaps in that order unless a safety or hardware-interface dependency requires a different sequence.
+Address the remaining gaps in the order listed unless a safety or
+hardware-interface dependency requires a different sequence.
