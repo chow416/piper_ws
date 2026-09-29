@@ -25,6 +25,10 @@ DOWN=0
 CHECK=0
 SETTLE=6
 OFFSET="0,0,0"
+# 按压参数，单位**米**，和 launch 参数同名。默认值和 launch 默认值一致，
+# 不在这里偷偷不一样。安全 demo 用 --standoff 0.010 --depth 0.0015。
+STANDOFF=0.005
+DEPTH=0.003
 VIEW=1            # --serve 时顺手把调试图转发到浏览器，--no-view 关掉
 VIEW_PORT=8098
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,6 +41,8 @@ while [ $# -gt 0 ]; do
     --check)     CHECK=1 ;;
     --no-view)   VIEW=0 ;;
     --view-port) VIEW_PORT="$2"; shift ;;
+    --standoff)  STANDOFF="$2"; shift ;;
+    --depth)     DEPTH="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
     -h|--help)   sed -n '2,15p' "$0"; exit 0 ;;
@@ -155,12 +161,15 @@ trap cleanup EXIT INT TERM
 if [ "$LIVE" = "1" ]; then EXEC=true; ENABLE=true; else EXEC=false; ENABLE=false; fi
 echo
 echo "════ 起服务 ════  execute=$EXEC hardware_enable=$ENABLE  max_presses=0"
+echo "  contact_standoff_m=$STANDOFF   （接近段停在瞄准点之前这么远）"
+echo "  press_depth=$DEPTH   （按压段越过瞄准点的行程）"
 echo "  常驻：来一条目标按一次。"
 dc_bg "ros2 run piper_marker_perception marker_locator.py --ros-args \
   --params-file /ws/install/piper_marker_perception/share/piper_marker_perception/config/marker_locator_orbbec.yaml \
   > /tmp/ml.log 2>&1"
 dc_bg "ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
   target_source:=topic max_presses:=0 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
+  contact_standoff_m:=$STANDOFF press_depth:=$DEPTH \
   > /tmp/press.log 2>&1"
 
 # 调试图转发 —— 不占相机设备，所以能和 marker_locator 同时开。
