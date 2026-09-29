@@ -163,7 +163,31 @@ tools/press_board.sh --serve --live   # 实机：真按
 ⚠️ **这个终端 Ctrl-C 会清干净**，包括那个不跟着 `ros2 launch` 退的
 `move_group` —— 手动清过两次都漏了它。**绝不动 bringup。**
 
-⚠️ 相机独占：这个和 `python3 tools/cam_view.py` 不能同时开。
+### 执行时看实时画面
+
+`--serve` 会顺手把调试图转发到浏览器：
+
+```
+  实时画面（带 marker 标注）  http://127.0.0.1:8098/
+```
+
+画面里是 `marker_locator` 发的那张带标注的图：九个 marker 的检测框、检测到的
+角点、板中心的坐标系（红 +X / 绿 +Y / 蓝 +Z 指向板外），顶上一行实时写着
+`markers 9  rms 0.46px  d 50.4cm`。下方还跟着帧龄、帧率和板距。
+
+**为什么不用 `cam_view.py`**：`/dev/video2` 是独占的，感知占着它的时候
+`cam_view.py` 打不开。而且调试图本来就是**更适合看的**那张 —— 它上面有检测结果，
+快出错的时候能提前看出来，而裸视频什么也看不出来。转发器不解码（直接把 JPEG
+字节搬进 HTTP 体），所以占不了多少 CPU。
+
+```bash
+tools/press_board.sh --serve --no-view        # 不要它
+tools/press_board.sh --serve --view-port 9000 # 换端口
+tools/press_board.sh --serve --live           # 实机，画面一样看
+```
+
+⚠️ 相机独占：**感知在跑的时候 `python3 tools/cam_view.py` 打不开。**
+要看就看上面这个地址。
 
 ⚠️ **别加 `target_frame:=base_link`。** 那要求手眼外参先进 URDF（见文末）。
 现在的板子位姿发在**相机光学系**，手眼由终端 4 的脚本显式施加 ——

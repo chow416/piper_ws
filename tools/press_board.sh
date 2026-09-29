@@ -2,8 +2,9 @@
 #
 # 按压标定板中心。按原来的五终端骨架排：
 #
-#   终端 3（常驻）  tools/press_board.sh --serve [--live]
+#   终端 3（常驻）  tools/press_board.sh --serve [--live] [--no-view]
 #                   = 感知 marker_locator + 按压任务，来一条目标按一次
+#                     顺手把调试图转发到 http://127.0.0.1:8098/ 供观察
 #   终端 4          tools/press_board.sh [--live] [--offset-mm a,b,c]
 #                   = 瞄准板中心先看一眼；加 --live 才真发
 #   任意            tools/press_board.sh --check     # 只做前提检查
@@ -24,6 +25,8 @@ DOWN=0
 CHECK=0
 SETTLE=6
 OFFSET="0,0,0"
+VIEW=1            # --serve 时顺手把调试图转发到浏览器，--no-view 关掉
+VIEW_PORT=8098
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [ $# -gt 0 ]; do
@@ -32,6 +35,8 @@ while [ $# -gt 0 ]; do
     --serve)     SERVE=1 ;;
     --down)      DOWN=1 ;;
     --check)     CHECK=1 ;;
+    --no-view)   VIEW=0 ;;
+    --view-port) VIEW_PORT="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
     -h|--help)   sed -n '2,15p' "$0"; exit 0 ;;
@@ -72,12 +77,18 @@ cleanup() {
   # 而执行这条命令的 shell 自己的命令行里就有这个字符串。不加方括号的话，
   # 在容器里 `bash -lc "pgrep -af ros2_control_node"` 会匹配到那个 bash 自己。
   # 方括号让正则匹配别人、不匹配字面量 '['，一个字符就解决了。
-  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'" >/dev/null 2>&1
+  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'; pkill -f '/ws/tools/[d]ebug_view.py'" >/dev/null 2>&1
   sleep 2
   dc "pkill -f '[m]ove_group'" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
   echo
-  echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / move_group"
-  echo "—— bringup 仍在跑，机械臂使能中、保持位姿"
+  echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / debug_view / move_group"
+  # 以前这里无条件写「bringup 仍在跑」。bringup 不在的时候那是句假话，
+  # 而这句话是操作者判断「臂还使能着吗」的依据，说错比不说更糟。
+  if dc "pgrep -f '[r]os2_control_node'" >/dev/null 2>&1; then
+    echo "—— bringup 仍在跑，机械臂使能中、保持位姿"
+  else
+    echo "—— ⚠️ bringup 没在跑 —— 机械臂现在是失能的（终端 1 起了吗？）"
+  fi
 }
 
 if [ "$DOWN" = "1" ]; then cleanup; exit 0; fi
@@ -146,6 +157,11 @@ dc_bg "ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
   target_source:=topic max_presses:=0 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
   > /tmp/press.log 2>&1"
 
+# 调试图转发 —— 不占相机设备，所以能和 marker_locator 同时开。
+if [ "$VIEW" = "1" ]; then
+  dc_bg "python3 tools/debug_view.py --port $VIEW_PORT > /tmp/view.log 2>&1"
+fi
+
 echo "  等节点起来（最多 60 s）..."
 for i in $(seq 1 60); do
   subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | awk '/Subscription count/{print \$3}'" 2>/dev/null)
@@ -163,7 +179,14 @@ for i in $(seq 1 60); do
 done
 
   echo
-  echo "════ 服务常驻中 ════   另开一个终端发目标："
+  echo "════ 服务常驻中 ════"
+  if [ "$VIEW" = "1" ]; then
+    echo "  实时画面（带 marker 标注）  http://127.0.0.1:$VIEW_PORT/"
+    echo "  （这是 marker_locator 发的调试图，不占相机设备。相机是独占的，"
+    echo "    所以感知在跑的时候 cam_view.py 打不开 —— 要看就看这个。）"
+    echo
+  fi
+  echo "  另开一个终端发目标："
   echo "     cd $WS_ROOT && tools/press_board.sh"
   echo "     cd $WS_ROOT && tools/press_board.sh --live"
   echo "  在这个终端里 Ctrl-C 会把服务连 move_group 一起清掉。"
