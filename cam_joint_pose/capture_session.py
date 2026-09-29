@@ -16,7 +16,7 @@ that started moving again in between.
 
 Output
 ------
-    <out>/pose_000.jpg     raw frame (unrotated unless --rotate-180)
+    <out>/pose_000.jpg     raw frame, exactly as the camera delivers it
     <out>/pose_000.json    that pose's record
     <out>/poses.json       the whole session
 
@@ -89,10 +89,6 @@ def parse_args(argv=None):
     group.add_argument("--fps", type=int, default=15)
     group.add_argument("--warmup", type=int, default=DEFAULT_WARMUP_FRAMES,
                        help="AE/AWB frames to throw away at startup")
-    group.add_argument("--rotate-180", action="store_true",
-                       help="rotate frames 180 deg. Pick one convention and "
-                            "stay with it -- the intrinsics must be calibrated "
-                            "on frames processed the same way (see README)")
 
     group = parser.add_argument_group("motion checks")
     group.add_argument("--settle-tolerance", type=float, default=0.002,
@@ -344,12 +340,16 @@ def main(argv=None):
             print(f"error: 读不了 {session_path}: {exc}\n"
                   f"       要重来就用 --fresh", file=sys.stderr)
             return 1
-        if bool(payload.get("rotate_180")) != args.rotate_180:
-            print("error: 这个 session 是用"
-                  f"{' --rotate-180' if payload.get('rotate_180') else '未旋转'} "
-                  "采的，和当前参数不一致。\n"
-                  "       混用会让主点差一整个图幅 —— 要么加上/去掉"
-                  " --rotate-180，要么 --fresh 重采。", file=sys.stderr)
+        # A session from before the camera was turned over physically. Its
+        # frames are rolled half a turn from the ones this script now stores, so
+        # continuing it would mix two conventions inside one calibration -- and
+        # nothing downstream could tell.
+        if payload.get("rotate_180"):
+            print("error: 这个 session 是「传感器倒装」时代采的"
+                  "（session 里记着 rotate_180: true）。\n"
+                  "       相机已经物理翻转，那些图是转过的，和现在采的放不到"
+                  "一起。\n"
+                  "       加 --fresh 重采。", file=sys.stderr)
             return 1
         print(f"  继续已有 session：{len(payload.get('samples', []))} 组")
 
@@ -358,7 +358,6 @@ def main(argv=None):
             "created": time.time(),
             "tool_frame": DEFAULT_TOOL_FRAME,
             "base_frame": DEFAULT_BASE_FRAME,
-            "rotate_180": args.rotate_180,
             "samples": [],
         }
     payload["updated"] = time.time()
@@ -385,8 +384,7 @@ def main(argv=None):
         try:
             camera = Camera(device=args.device, width=args.width,
                             height=args.height, fps=args.fps,
-                            warmup_frames=args.warmup,
-                            rotate_180=args.rotate_180)
+                            warmup_frames=args.warmup)
         except RuntimeError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 1
@@ -404,8 +402,7 @@ def main(argv=None):
         print(f"  目标组数   {args.target}"
               f"（已有 {len(payload['samples'])}）")
         print(f"  相机       {camera.device}  {args.width}x{args.height} "
-              f"@{args.fps}  "
-              f"{'已旋转 180°' if args.rotate_180 else 'raw（未旋转）'}")
+              f"@{args.fps}")
         print(f"  工具系     {poses.describe_frames()}")
         print("=" * 62)
 

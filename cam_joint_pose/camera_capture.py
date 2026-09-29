@@ -22,22 +22,17 @@ assembled in userspace. That is only acceptable while the arm is *stationary*,
 which is how hand-eye calibration has to be done anyway: move, wait for the
 joints to settle, then capture. Never capture mid-motion.
 
-The 180 degree sensor roll
---------------------------
-The sensor is mounted upside down inside the housing, so raw frames come out
-rotated by 180 degrees. Two self-consistent ways to deal with it:
+The camera roll
+---------------
+None to deal with. The sensor used to sit upside down inside the housing and
+this script used to offer `--rotate-180` for it; the camera has since been
+turned over physically, so raw frames arrive the right way up and nothing here
+rotates them.
 
-  raw (default)  Do not rotate. Calibrate the camera intrinsics on raw frames
-                 too. The 180 degrees is then absorbed into the hand-eye
-                 result, which is perfectly fine as long as the perception node
-                 uses that same result.
-
-  --rotate-180   Rotate, so frames match the nominal optical frame in the URDF.
-                 The intrinsics must be calibrated on the *rotated* frames:
-                 the principal point becomes (W-1-cx, H-1-cy).
-
-Pick one and stay consistent. Mixing rotated images with raw intrinsics (or the
-datasheet values) shifts the principal point by a whole image dimension.
+If a camera is ever mounted inverted again, flip it physically rather than
+reintroducing a rotation: a 180 degree roll about the optical axis is a *fixed*
+rotation, so it folds into the board pose without a word, and the wrong answer
+is the one that looks tidiest.
 """
 
 import argparse
@@ -134,10 +129,9 @@ class Camera:
 
     def __init__(self, device=None, width=1920, height=1080, fps=15,
                  pixel_format="MJPG", payload="mjpg",
-                 warmup_frames=DEFAULT_WARMUP_FRAMES, rotate_180=False):
+                 warmup_frames=DEFAULT_WARMUP_FRAMES):
         self.width = width
         self.height = height
-        self.rotate_180 = rotate_180
         self.warmup_frames = warmup_frames
         self.payload = payload
         self.device = resolve_device(device or "/dev/video2")
@@ -214,8 +208,6 @@ class Camera:
                 if self._delivered <= self.warmup_frames:
                     continue
                 self._warm = True
-            if self.rotate_180:
-                frame = _rotate180(frame)
             return frame, time.time()
 
     def close(self):
@@ -237,21 +229,6 @@ class Camera:
         return False
 
 
-def _rotate180(jpeg):
-    """Lossless 180 degree rotation -- a pure index flip, no resampling."""
-    try:
-        import io
-        from PIL import Image
-    except ImportError as exc:                             # pragma: no cover
-        raise RuntimeError(
-            "--rotate-180 needs Pillow (`pip install pillow`, or drop the "
-            "flag and calibrate on raw frames instead)") from exc
-    image = Image.open(io.BytesIO(jpeg)).rotate(180, expand=True)
-    out = io.BytesIO()
-    image.save(out, format="JPEG", quality=95)
-    return out.getvalue()
-
-
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__,
@@ -268,16 +245,13 @@ def main():
     parser.add_argument("--interval", type=float, default=0.0,
                         help="seconds between saves (0 = as fast as possible)")
     parser.add_argument("--warmup", type=int, default=DEFAULT_WARMUP_FRAMES)
-    parser.add_argument("--rotate-180", action="store_true",
-                        help="rotate 180 deg (see the module docstring)")
     args = parser.parse_args()
 
     try:
         camera = Camera(device=args.device, width=args.width,
                         height=args.height, fps=args.fps,
                         pixel_format=args.pixel_format,
-                        warmup_frames=args.warmup,
-                        rotate_180=args.rotate_180)
+                        warmup_frames=args.warmup)
     except RuntimeError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -285,8 +259,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     manifest = []
     print(f"{camera.device}  {args.width}x{args.height} @{args.fps} "
-          f"{args.pixel_format}"
-          f"{'  rotated 180' if args.rotate_180 else '  raw'}")
+          f"{args.pixel_format}  raw")
     print(f"discarding {args.warmup} warm-up frames (AE/AWB)...")
 
     try:
@@ -317,7 +290,6 @@ def main():
         "height": args.height,
         "fps": args.fps,
         "pixel_format": args.pixel_format,
-        "rotated_180": args.rotate_180,
         "warmup_frames": args.warmup,
         "frames": manifest,
     }

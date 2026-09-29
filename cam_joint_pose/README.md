@@ -107,7 +107,6 @@ python3 /ws/cam_joint_pose/capture_session.py --out ~/calib_data
 
 ```bash
 python3 capture_session.py --target 25                 # 目标组数（只影响提示）
-python3 capture_session.py --rotate-180                 # 见坑 1，选定后不能改
 python3 capture_session.py --settle-tolerance 0.001     # 臂在抖时放宽/收紧
 python3 capture_session.py --help
 ```
@@ -115,7 +114,7 @@ python3 capture_session.py --help
 ⚠️ 跑之前确认两件事：
 
 1. **`robot_state_publisher` 活着** —— 来自硬件 bringup，否则查不到 TF
-2. **`tools/cam_view.py` 已经关掉** —— 相机独占（坑 5）
+2. **`tools/cam_view.py` 已经关掉** —— 相机独占（坑 4）
 
 ---
 
@@ -142,7 +141,7 @@ reader = JointStateReader()
 poses = ToolPoseProvider(reader)          # base_link <- press_tool_link
 
 samples = []
-with Camera(rotate_180=False) as cam:     # 见下方"180° 旋转"一节
+with Camera() as cam:
     for index in range(20):
         input(f"[{index+1}/20] 把机械臂移到位姿，摆好标定板，然后回车...")
 
@@ -197,29 +196,16 @@ ros2 launch piper_hardware piper_real_bringup.launch.py enable_motors:=true comm
 
 ---
 
-## ⚠️ 六个坑（都是踩过的）
+## ⚠️ 五个坑（都是踩过的）
 
-### 1. ⚠️ 图像有 180° 旋转
-
-相机传感器在壳体内是倒装的，**原始图像是上下颠倒的**。
-
-两个自洽的做法，**选一个并全程一致**：
-
-| 做法 | 怎么用 | 内参怎么办 |
-|---|---|---|
-| **raw（默认）** | 不旋转，存原始图 | 内参也在**原始图**上标定。那 180° 会被**吸收进手眼标定结果**里，感知节点用同一份结果即可 |
-| **`--rotate-180`** | 旋转后存，和 URDF 名义光学系一致 | 内参必须在**旋转后**的图上标定：主点变成 $(W-1-c_x,\ H-1-c_y)$ |
-
-**混用会毁掉一切** —— 用原始图的内参去处理旋转后的图，主点差一整个图幅。
-
-### 2. ⚠️ 工具坐标系是 `press_tool_link`，不是 `gripper_base`
+### 1. ⚠️ 工具坐标系是 `press_tool_link`，不是 `gripper_base`
 
 press 配置下相机挂在 **`press_tool_link`** 下面（见 `piper_press_tool.xacro`）。
 在普通配置下才是 `gripper_base`。**xacro 里 `parent_link` 是个参数**，两种都有。
 
 另外注意：**不是 `press_tcp`**（那是压杆尖端）。
 
-### 3. ⚠️ 相机端坐标系要用 `wrist_depth_camera_optical_frame`
+### 2. ⚠️ 相机端坐标系要用 `wrist_depth_camera_optical_frame`
 
 `solvePnP` 输出的是**光学系**（Z 前 / X 右 / Y 下，REP-103）。
 
@@ -229,7 +215,7 @@ URDF 里有两个：
 
 搞混 = 差一个 90° 旋转，结果完全错乱。
 
-### 4. ⚠️ 当前的相机安装值是**设计值**，不是实测值
+### 3. ⚠️ 当前的相机安装值是**设计值**，不是实测值
 
 ```xml
 <joint name="wrist_depth_camera_joint" type="fixed">
@@ -241,7 +227,7 @@ URDF 里有两个：
 
 这就是手眼标定要求的东西。标定完成后用它覆盖这里的 `origin`。
 
-### 5. ⚠️ 相机是**独占设备**
+### 4. ⚠️ 相机是**独占设备**
 
 同一时刻只能有一个进程打开 `/dev/video2`。
 
@@ -250,7 +236,7 @@ sudo fuser -v /dev/video2        # 看谁占着
 pkill -f camera_capture.py
 ```
 
-### 6. ⚠️ 必须在**臂静止**时采集
+### 5. ⚠️ 必须在**臂静止**时采集
 
 这条路径拿不到硬件曝光时间戳，记录的只是"用户态组装完成"的时刻。
 臂在动的话，这个延迟直接变成标定误差。
@@ -299,8 +285,8 @@ pkill -f camera_capture.py
 
 | 现象 | 先查 |
 |---|---|
-| 抓图失败 `Cannot open device` | 相机是不是被别的进程占着（坑 5）|
+| 抓图失败 `Cannot open device` | 相机是不是被别的进程占着（坑 4）|
 | 找不到 `/dev/video2` | `lsusb \| grep -i orbbec`；脚本会自动回退 by-id |
 | `TF ... unavailable` | `robot_state_publisher` 在跑吗？URDF 里有那个 frame 吗？|
 | `joints did not settle` | 臂是不是还在动？或者 tolerance 太严 |
-| 标定结果明显错乱 | 十有八九是坑 3（`link` vs `optical_frame`）|
+| 标定结果明显错乱 | 十有八九是坑 2（`link` vs `optical_frame`）|
