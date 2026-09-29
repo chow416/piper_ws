@@ -77,7 +77,7 @@ RUN set -eux; \
         build-essential cmake ninja-build pkg-config ccache \
         python3-pip python3-dev python3-venv python3-setuptools \
         iproute2 iputils-ping net-tools usbutils udev kmod \
-        can-utils \
+        can-utils v4l-utils \
         x11-utils x11-apps mesa-utils \
         libgl1 libglu1-mesa libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgbm1 \
         dbus-x11 \

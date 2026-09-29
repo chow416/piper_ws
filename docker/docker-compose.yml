@@ -56,11 +56,30 @@ services:
       # 可选：把额外的环境变量文件挂进来，改完重启容器即可生效，无需重建镜像
       - ./piper_env.sh:/etc/piper_env.sh:ro
 
-    # 下面的设备透传默认注释掉，需要时按需放开（见 README 第 4 节）
-    #   USB-CAN 适配器（如 CANable / 广成 USBCAN）：
+    # ── 设备透传 ──────────────────────────────────────────────────────
+    #
+    # ⚠️ 容器默认看不到宿主任何字符设备。但 SocketCAN **不**受此影响 ——
+    #    can0 是网络接口，走的是上面 network_mode: host，所以 CAN 一直可用，
+    #    而相机（/dev/video*，字符设备）不行。两者机制不同，别搞混。
+    #
+    # 为什么用 privileged 而不是写死 `devices: - /dev/video2`：
+    #   · /dev/videoN 的编号随插拔顺序、拓展坞上电顺序变，写死后某天会直接
+    #     起不来 —— devices 里写不存在的节点是**硬报错**，不是警告
+    #   · 实测 privileged 能拿到宿主全部设备（含任意 /dev/videoN）
+    #
+    # ⚠️ 实测：即使 privileged，容器里也**没有** /dev/v4l/by-id/ 这个软链目录
+    #    （/dev 是 tmpfs，只重建了设备节点，不重建 udev 的软链树）。
+    #    所以容器内一律用 /dev/videoN，认设备要靠
+    #    `v4l2-ctl --list-devices` 按名字找，不能靠 by-id。
+    privileged: true
+
+    # 更克制、但要求节点号固定的替代写法（和上面二选一）：
+    # device_cgroup_rules:
+    #   - 'c 81:* rmw'          # 81 = video4linux 主设备号
     # devices:
-    #   - /dev/ttyACM0:/dev/ttyACM0
-    #   SocketCAN / 需要直接操作网卡时，改用 privileged：
-    # privileged: true
+    #   - /dev/video2:/dev/video2
+    # ⚠️ 注意 device_cgroup_rules 单独用**不够** —— 它只加 cgroup 权限，
+    #    不会在容器里创建节点，实测容器里仍然 /dev/video* 不存在。
+    #    必须配 devices: 一起用（而 devices: 又要求节点当下存在）。
 
     restart: "no"

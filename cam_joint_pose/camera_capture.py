@@ -61,20 +61,68 @@ STREAM_ERROR = ""
 
 
 def resolve_device(requested):
-    """Return a usable device path, falling back to the stable by-id symlink.
+    """Return a usable device path, or None if the camera is not there at all.
 
-    `/dev/videoN` is assigned in enumeration order, so it changes whenever the
-    camera is replugged or the dock comes up in a different sequence. The by-id
-    path always points at the same physical camera.
+    Three strategies, in order, because no single one works everywhere:
+
+      1. `requested`, if it exists -- lets the caller pin the device.
+      2. `/dev/v4l/by-id/*Orbbec*` -- stable across replugs, but udev does not
+         build this tree inside a container. /dev there is a tmpfs that only
+         receives the device nodes themselves, no symlink directories.
+      3. `/sys/class/video4linux/videoN/name` matched against the camera's name.
+         sysfs is the host's, mounted read-only, so it is visible inside a
+         container even when /dev is not -- which makes this the strategy that
+         keeps working there.
+
+    Raises RuntimeError when sysfs shows the camera but its /dev node is missing.
+    That combination has exactly one cause -- this process is in a container
+    without device passthrough -- and a distinct fix, so it is worth saying
+    instead of collapsing into the generic "no camera found".
     """
     if requested and os.path.exists(requested):
         return requested
-    candidates = sorted(glob.glob("/dev/v4l/by-id/*Orbbec*video-index0"))
+
+    candidates = sorted(p for p in glob.glob("/dev/v4l/by-id/*Orbbec*")
+                        if os.path.exists(p))
     if candidates:
+        # video-index0 is the RGB stream; index1 carries no useful format.
         print(f"note: {requested} not present; using {candidates[0]}",
               file=sys.stderr)
         return candidates[0]
+
+    named = _video_devices_by_name()
+    matched = [node for node, name in sorted(named.items())
+               if "orbbec" in name or "dabai" in name]
+    if matched:
+        node = matched[0]
+        if os.path.exists(node):
+            print(f"note: {requested} not present and no /dev/v4l/by-id; "
+                  f"matched by name: {node} ({named[node]})", file=sys.stderr)
+            return node
+        raise RuntimeError(
+            f"{node} is present in sysfs as '{named[node]}', but the device "
+            f"node does not exist -- this process has no access to the host's "
+            f"video devices.\n"
+            f"    Almost certainly a container without device passthrough.\n"
+            f"    Check `docker/docker-compose.yml` sets privileged: true, then\n"
+            f"    `docker compose up -d`.")
     return None
+
+
+def _video_devices_by_name():
+    """Map '/dev/videoN' -> lowercased device name, read from sysfs.
+
+    The node is included even when it does not exist here, because sysfs
+    reflects the host kernel rather than this mount namespace.
+    """
+    found = {}
+    for entry in sorted(glob.glob("/sys/class/video4linux/video*")):
+        try:
+            with open(os.path.join(entry, "name")) as handle:
+                found["/dev/" + os.path.basename(entry)] = handle.read().strip().lower()
+        except OSError:
+            continue
+    return found
 
 
 class Camera:
@@ -95,8 +143,11 @@ class Camera:
         self.device = resolve_device(device or "/dev/video2")
         if self.device is None:
             raise RuntimeError(
-                "no camera found. Check `lsusb | grep -i orbbec` and "
-                "`ls -l /dev/v4l/by-id/`.")
+                "no camera found.\n"
+                "    `lsusb | grep -i orbbec`     -- is it plugged in?\n"
+                "    `ls /sys/class/video4linux/`  -- what does the kernel see?\n"
+                "    `ls -l /dev/video*`          -- which needs `v4l2-ctl "
+                "--list-devices`")
 
         cmd = [
             "v4l2-ctl", "-d", self.device,
