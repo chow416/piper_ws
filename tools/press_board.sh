@@ -101,6 +101,9 @@ fi
 # 令牌文件放在**工作区里**而不是 /tmp：宿主看到 ~/piper_ws/.press_serve.owner，
 # 容器看到 /ws/.press_serve.owner —— bind mount，是同一个文件，两边才说得通。
 SERVE_OWNER_FILE="$WS_ROOT/.press_serve.owner"
+# ⚠️ 锁文件必须在 cleanup **之前**定义：--down 的 cleanup 也要删它（见下面那段），
+# 而 --down 不经过 --serve 分支 —— 写在那里的话这里就是 unbound variable（set -u）。
+SERVE_LOCK_FILE="$WS_ROOT/.press_serve.lock"
 SERVE_TOKEN="$$-$(date +%s)"
 FORCE=0
 
@@ -120,6 +123,17 @@ cleanup() {
   dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'; pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
   sleep 2
   dc "pkill -f '[m]ove_group'" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
+  # ⚠️ 残留的 --serve **外壳**也要收：它不是容器里那些节点，上面几个 pkill 都看不见
+  # 它，而它拿着服务锁。不收的话下一轮 --serve 会被自己的锁挡在门外，报
+  # 「已经有 --serve 在跑」，可现场其实早就空了 —— 看着像 bug，其实是残壳。
+  # 两种层次各有一份外壳，所以容器里一下、宿主上也一下：
+  #   容器里跑的（docker exec 进去的那种）宿主 pgrep 看不见；
+  #   宿主上跑的（sg docker -c '...' 那种）容器里也看不见。
+  dc "pkill -f '[t]ools/press_board.sh --serve'" >/dev/null 2>&1
+  pkill -f "[t]ools/press_board.sh --serve" >/dev/null 2>&1
+  # 锁文件本身也删掉：万一外壳在另一个命名空间里收不到，删了文件下一轮才能建新的
+  # （flock 认 inode，删掉即换新 inode）。令牌才是防误杀的那道，见上面的说明。
+  rm -f "$SERVE_LOCK_FILE"
   echo
   echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / debug_view / move_group"
   # 以前这里无条件写「bringup 仍在跑」。bringup 不在的时候那是句假话，
@@ -201,7 +215,6 @@ if [ "$SERVE" = "1" ]; then
 # 同样含 'press_board.sh --serve'，只排除 $$ 会把自己判成「别人」——
 # 实测就这么误报过一次，把自己挡在门外。flock 认的是文件锁，不认命令行：
 # 进程一死锁自动放；宿主实例和容器实例共用同一个 inode，两边也能互斥。
-SERVE_LOCK_FILE="$WS_ROOT/.press_serve.lock"
 exec 9>"$SERVE_LOCK_FILE"
 if ! flock -n 9; then
   echo "★ 已经有 --serve 在跑（锁 $SERVE_LOCK_FILE 被占），不再叠一份。"
@@ -334,6 +347,12 @@ elif [ "$LIVE" != "1" ] && [ "$task_exec" = "True" ]; then
   echo "  （任务是实机模式，但这里没加 --live —— 所以只算不发）"
 fi
 
+# ⚠️ 先数一遍「Press N finished」有几条。等结果时**必须**比这个数更大才算这一轮
+# 跑完 —— 光 `grep -q` 的话，第二次按压之后那个循环会立刻命中**上一轮**留下的旧日志，
+# 于是「执行中」瞬间结束、打印出来的是上一轮的结果（实测踩到，很容易看漏）。
+pressed_before=$(dc "grep -c 'Press .* finished' /tmp/press.log" 2>/dev/null)
+pressed_before=${pressed_before:-0}
+
 if [ "$LIVE" = "1" ]; then PUB="--publish"; else PUB=""; fi
 dc "python3 tools/press_board_centre.py --settle $SETTLE --offset-mm $OFFSET $PUB"
 aim_rc=$?
@@ -352,14 +371,21 @@ fi
 if [ "$LIVE" = "1" ]; then
   echo
   echo "════ 执行中 ════"
-  for i in $(seq 1 40); do
-    if dc "grep -q 'Press .* finished' /tmp/press.log" 2>/dev/null; then break; fi
+  done_now=0
+  for i in $(seq 1 60); do
+    done_now=$(dc "grep -c 'Press .* finished' /tmp/press.log" 2>/dev/null)
+    if [ "${done_now:-0}" -gt "$pressed_before" ] 2>/dev/null; then break; fi
     sleep 1
   done
+  if [ "${done_now:-0}" -le "$pressed_before" ] 2>/dev/null; then
+    echo "  ⚠️ 等了 60 s 还没看到这一轮结束，日志尾巴："
+  fi
   echo
-  dc "grep -viE 'corrupt|Select|ompl|moveit_ros|planner configuration' /tmp/press.log | tail -18"
+  # 只印**这一轮**：从最后一条 'Accepted target' 开始，不带旧轮次。
+  n=$(dc "grep -n 'Accepted target' /tmp/press.log | tail -1 | cut -d: -f1" 2>/dev/null)
+  dc "tail -n +${n:-1} /tmp/press.log | grep -viE 'corrupt|Select|ompl|moveit_ros|planner configuration|was not set|was set to|adapter|Loaded robot|No root/virtual' | cut -c1-165"
   echo
-  dc "grep -E 'Actual TCP at approach end' /tmp/press.log" 2>/dev/null \
+  dc "grep -E 'Actual TCP at approach end' /tmp/press.log | tail -1" 2>/dev/null \
     | sed 's/^/  → /'
   echo
   echo "  ⚠️ 这行是**控制器跟踪误差**，不是标定误差。落点准不准要看板上的压痕。"

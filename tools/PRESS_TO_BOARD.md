@@ -24,8 +24,17 @@
 容器里没有 `docker` 这条命令，更没有 docker 组 —— **报的错和真因差得很远**，
 第一次碰到很难想到是层次错了。
 
-**下面终端 0~4 的所有命令两种层次都直接用**：`tools/press_board.sh` 和 `piper`
-自己会判断（判据是工作区在 `~/piper_ws` 还是 `/ws`）。
+⚠️ **`tools/press_board.sh` 本身两种层次都直接能用**（它自己判层，判据是工作区在
+`~/piper_ws` 还是 `/ws`）—— **但它前面的 `cd` 和 `piper` 简写不能照抄**：
+
+| | 宿主机（`zlf@…:~/piper_ws$`） | 容器里（`dev@piper-dev:/ws$`） |
+|---|---|---|
+| 进工作区 | `cd ~/piper_ws` | `cd /ws` |
+| `piper` 简写 | 可用（先 `source ~/piper_ws/tools/piper.sh`） | **✗ 不存在**（实测），要写全 `ros2 run …` |
+| 按压脚本 | `tools/press_board.sh …` | `tools/press_board.sh …`（一样） |
+
+**光看「命令对不对」看不出来 —— 照抄另一层的 `cd` 只会得到
+`No such file or directory`，而那看起来像脚本不存在。**
 
 只有一件事必须知道怎么转换：
 
@@ -47,12 +56,78 @@ sg docker -c 'docker exec -it piper_dev bash -lc "
 ```
 
 这是唯一需要手改的转换，其余都一样。
+```
 ```bash
 # 一次性把 sg/docker/source 那串样板收成一个词（建议写进 ~/.bashrc）
+# ⚠️ 只在**宿主机**有用 —— 容器里没有 piper 这个命令（实测）
 source ~/piper_ws/tools/piper.sh
 piper_check     # = 终端 0 的自检
 piper_down      # 清理终端 3 起的服务
 ```
+
+---
+
+## 🚀 一键 demo（日常就用这个）
+
+一个窗口跑完原来的「终端 3 + 终端 4」。**不需要另开窗口**。
+
+```bash
+# 容器里：cd /ws        宿主机：cd ~/piper_ws
+cd /ws
+
+tools/demo.sh                 # 干跑：起服务 + 瞄准一次，机械臂不动
+tools/demo.sh --live          # 实机：起服务 + 真按一次
+tools/demo.sh --live --offset-mm -3,0,0     # 瞄偏 3mm 再按
+```
+
+它做的事情，按顺序：
+
+1. `--down` 清掉上一轮残留（**绝不动 bringup**）
+2. 后台起服务，等就绪（就绪判据含 `move_group` 存活）
+3. 跑一遍瞄准，打印板中心 / 瞄准点 / 按压方向 / 需要移动
+4. `--live` 才发目标，并**只印这一轮**的日志（旧轮次不串场）
+5. 停在交互循环里：
+
+```
+══ 回车 = 再按一次   a = 只瞄准   q = 退出并清理 ══
+>
+```
+
+`q` 或 Ctrl-C 都会回收——服务是本脚本的子进程，不会留残壳。
+
+**参数**
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--standoff M` | **0.025** | 接近段停在瞄准点前这么远。默认值就是实测出来的那个（见下） |
+| `--depth M` | 0.0015 | 按压段行程 |
+| `--offset-mm a,b,c` | 0,0,0 | **板系**偏移，瞄准时现用，**改了不用重起** |
+| `--settle` | 6 | 瞄准前稳定帧的时间 |
+
+⚠️ `--standoff` / `--depth` 是**启动参数**：改了要退出重跑（服务得重起）。
+`--offset-mm` 不用。
+
+### ⚠️ 为什么 standoff 默认是 25 mm
+
+实测结论：**把接近段终点前移 25 mm，杆尖才差不多停在目标点前面。**
+也就是说，模型算出的杆尖位置比真实杆尖**靠后一个常数量**，约 25 mm。
+
+证据（同一个 standoff、三种板子姿态）：
+
+| 板子 | 瞄准点 (mm) | 接近终点轴向偏差 |
+|---|---|---|
+| 直立 | (577.0, −53.1, 204.1) | −28.0 mm |
+| 直立（板子自己挪了） | (582.6, −46.7, 204.2) | −27.8 mm |
+| 斜过来 | (615.6, −55.2, 204.9) | −28.2 mm |
+
+三组离散只有 **0.4 mm** —— **偏差不随板子姿态变化**。
+这条很关键：如果偏差来自手眼**旋转**错，斜板子时这个数会明显变。
+所以它是个恒定轴向量，也就是沿杆方向的固定误差 ⇒ 指向**压杆长度**，
+而不是手眼。
+
+🚧 **还没定案**：到底该改 `press_tool_length`（现在 154.1 mm）还是别的地方，
+要看杆尖离板面**实际**还差多少 —— 得人眼看着报一个数。
+在那之前，**不要拿这套参数去戳真按键**。
 
 ---
 
@@ -96,6 +171,11 @@ ip -details link show can0
 ## 终端 1 —— 硬件使能 + 控制器（常驻，不要关）
 
 ```bash
+# 容器里（piper 简写不存在，写全）
+ros2 launch piper_hardware piper_real_bringup.launch.py \
+    enable_motors:=true command_speed_ratio:=20
+
+# 宿主机（先 source ~/piper_ws/tools/piper.sh）
 piper ros2 launch piper_hardware piper_real_bringup.launch.py \
     enable_motors:=true command_speed_ratio:=20
 ```
@@ -112,6 +192,10 @@ piper ros2 launch piper_hardware piper_real_bringup.launch.py \
 ## 终端 2 —— 归位
 
 ```bash
+# 容器里
+ros2 run piper_elevator_manipulation go_home.py
+
+# 宿主机
 piper ros2 run piper_elevator_manipulation go_home.py
 ```
 
@@ -132,10 +216,16 @@ piper ros2 run piper_elevator_manipulation go_home.py
 ## 终端 3 —— 按压服务（常驻，来一条目标按一次）
 
 ```bash
-cd ~/piper_ws
+# 容器里：cd /ws        宿主机：cd ~/piper_ws
+cd /ws
 tools/press_board.sh --serve          # 干跑：算 IK 和轨迹，但不动
 tools/press_board.sh --serve --live   # 实机：真按
+
+# 安全 demo 的按压参数（接近段停在接触前 10 mm，只压 1.5 mm）
+tools/press_board.sh --serve --live --standoff 0.010 --depth 0.0015
 ```
+
+（`--standoff` / `--depth` 同名透传给 launch；不加就是默认 `0.005 / 0.003`。）
 
 这一条命令起了两个节点（原来要在两个终端里分别敲）：
 
@@ -152,7 +242,7 @@ tools/press_board.sh --serve --live   # 实机：真按
 
 ════ 起服务 ════  execute=false hardware_enable=false  max_presses=0
   常驻：来一条目标按一次。
-  ✓ 任务已待命，感知在发板子位姿（5s）
+  ✓ 任务已待命，感知在发板子位姿，move_group 在跑（5s）
 
 ════ 服务常驻中 ════   另开一个终端发目标：
      cd /home/zlf/piper_ws && tools/press_board.sh
@@ -170,6 +260,10 @@ tools/press_board.sh --serve --live   # 实机：真按
 ```
   实时画面（带 marker 标注）  http://127.0.0.1:8098/
 ```
+
+⚠️ **服务会自己看着自己。** 它每 5 s 摸一次 `press_button_demo` 和 `move_group` 的
+脉，连着两次不在就打印原因并退出，把服务锁放掉 —— 不会出现「终端 3 看着在跑、
+其实栈早死了」那种情况。退出前确实已经没了的日志在 `/tmp/press.log` 和 `/tmp/ml.log`。
 
 画面里是 `marker_locator` 发的那张带标注的图：九个 marker 的检测框、检测到的
 角点、板中心的坐标系（红 +X / 绿 +Y / 蓝 +Z 指向板外），顶上一行实时写着
@@ -198,10 +292,20 @@ tools/press_board.sh --serve --live           # 实机，画面一样看
 ## 终端 4 —— 发目标点（瞄准板中心）
 
 ```bash
-cd ~/piper_ws
+# 容器里：cd /ws        宿主机：cd ~/piper_ws
+cd /ws
 tools/press_board.sh                  # 只算不发 —— 永远先跑这个
 tools/press_board.sh --live           # 真发出去
 tools/press_board.sh --live --offset-mm -3,0,0    # 瞄偏 3mm 再发
+```
+
+⚠️ **`move_group` 不在时会当场拦住**（实测）：发目标前先查规划器，不在就直接退出，
+不会让你白等一轮：
+
+```
+★ move_group 不在跑 —— 现在发目标，任务会在 'capture live start state' 就失败：
+     Failed to acquire current PlanningScene within timeout of 3s
+   去终端 3 重起服务：tools/press_board.sh --serve [--live]
 ```
 
 ```
@@ -308,8 +412,10 @@ tools/press_board.sh --help
 |---|---|---|
 | `marker_locator` 打不开相机 | `cam_view.py` 占着 | `pkill -f cam_view.py` |
 | 改完 config 没生效 | `ros2 run` 读 `install/`，`colcon` 只复制不删除 | 重新 build；删过文件要 `rm -rf build/<pkg> install/<pkg>` |
-| `move_group` 杀了还在 | 它不跟着 `ros2 launch` 的 PID 退 | `piper_down` / `--down`（已自动） |
-| 臂反应很慢 / 卡住不动 | **两个** `ros2_control_node` 或**两个** `move_group` | `piper_check` |
+| `move_group` 杀了还在 | 它不跟着 `ros2 launch` 的 PID 退 | `tools/press_board.sh --down`（已自动） |
+| 臂反应很慢 / 卡住不动 | **两个** `ros2_control_node` 或**两个** `move_group` | `tools/press_board.sh --check` |
+| 终端 4 报 `Failed to acquire current PlanningScene`，臂一动不动 | `move_group` 被**残留实例**退出时按名字 `pkill` 误杀 | 已修（服务归属令牌）；重起终端 3 |
+| 容器里 `piper`、`cd ~/piper_ws` 都报错 | 命令是从另一层抄的 | `cd /ws`；`piper` 写成全的 `ros2 run …` |
 | IK 残差大、落点偏 | j2/j3 压在硬限位上，5 自由度塌缩成 3 | **终端 2 的 `go_home.py`** |
 | RViz 里机器人不动 | `use_sim_time` 默认 true，实机没人发 `/clock` | 确认 `use_sim_time:=false` |
 | 距离读数整体放大 2.86 倍 | 有人用了那份退化的内参 | `check_intrinsics.py` 体检 |
