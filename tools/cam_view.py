@@ -7,13 +7,15 @@ the JPEG start/end markers, then hand the raw frames to the browser as a
 `multipart/x-mixed-replace` stream. Firefox, Chrome and the VS Code embedded
 browser all render that natively as video.
 
-The sensor is mounted upside down, so the page rotates the image with a CSS
-transform rather than re-encoding every frame. A 1080p rotate+save in Python
-would cost about as much as the capture itself; the CSS version is free.
+The camera used to be mounted upside down and the page rotated the image with a
+CSS transform rather than re-encoding every frame. It has since been mounted
+right way up, so the default is now no rotation at all; the option is kept
+because re-mounting it the other way round is a five-minute job and produces an
+image that looks perfectly normal until you notice the markers are mirrored.
 
 Usage:
     python3 tools/cam_view.py                 # 1920x1080 @ 15 fps on :8099
-    python3 tools/cam_view.py --rotate 0      # if the camera gets re-mounted
+    python3 tools/cam_view.py --rotate 180    # if it gets re-mounted upside down
     python3 tools/cam_view.py --width 640 --height 480 --fps 30
     python3 tools/cam_view.py --snapshot /tmp/shot.jpg   # one frame, no server
 """
@@ -239,8 +241,9 @@ def main():
     ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--pixelformat", default="MJPG")
     ap.add_argument("--port", type=int, default=8099)
-    ap.add_argument("--rotate", type=int, default=180,
-                    help="CSS rotation in degrees; the sensor is mounted upside down")
+    ap.add_argument("--rotate", type=int, default=0,
+                    help="CSS rotation in degrees; only needed if the camera "
+                         "is re-mounted upside down")
     ap.add_argument("--snapshot", metavar="FILE",
                     help="write one warmed-up frame and exit, no server")
     args = ap.parse_args()
