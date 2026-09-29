@@ -77,7 +77,7 @@ cleanup() {
   # 而执行这条命令的 shell 自己的命令行里就有这个字符串。不加方括号的话，
   # 在容器里 `bash -lc "pgrep -af ros2_control_node"` 会匹配到那个 bash 自己。
   # 方括号让正则匹配别人、不匹配字面量 '['，一个字符就解决了。
-  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'; pkill -f '/ws/tools/[d]ebug_view.py'" >/dev/null 2>&1
+  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'; pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
   sleep 2
   dc "pkill -f '[m]ove_group'" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
   echo
