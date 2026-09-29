@@ -27,8 +27,10 @@ esac
 piper() {
   if [ "$PIPER_IN_CONTAINER" = "1" ]; then
     if [ $# -eq 0 ]; then exec bash -l; fi
-    ( source /opt/ros/humble/setup.bash && source /ws/install/setup.bash \
-      && cd /ws && eval "$*" )
+    # set +u 两次：调用者的 shell 可能开了 nounset，而 ROS 的 setup.bash
+    # 会引用未定义变量（例如 $AMENT_TRACE_SETUP_FILES），一 source 就退出。
+    ( set +u; source /opt/ros/humble/setup.bash
+      source /ws/install/setup.bash && cd /ws && eval "$*" )
     return $?
   fi
   if [ $# -eq 0 ]; then

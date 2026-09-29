@@ -63,8 +63,14 @@ esac
 PRELUDE='source /opt/ros/humble/setup.bash && source /ws/install/setup.bash && cd /ws'
 
 if [ "$IN_CONTAINER" = "1" ]; then
-  dc()    { ( eval "$PRELUDE && $*" ); }
-  dc_bg() { ( eval "$PRELUDE && $*" ) & }
+  # ⚠️ **必须先 set +u 再 source。** ROS 的 /opt/ros/humble/setup.bash 会直接引用
+  # $AMENT_TRACE_SETUP_FILES 这类可能未定义的变量，而本脚本开了 set -u
+  # （nounset），一 source 就是：
+  #     /opt/ros/humble/setup.bash: line 8: AMENT_TRACE_SETUP_FILES: unbound variable
+  # 宿主分支没这个问题，因为那里是 docker exec 起的一个**全新 bash**，没有 set -u ——
+  # 所以这个 bug 只在容器里直接跑时才现形。
+  dc()    { ( set +u; eval "$PRELUDE && $*" ); }
+  dc_bg() { ( set +u; eval "$PRELUDE && $*" ) & }
 else
   # 命令走 stdin 而不是 -c，因为传给它的命令里经常带单引号，
   # 而这里外面已经套了 sg 的双引号和 bash 的单引号 —— 三层引号叠起来必炸一次。
@@ -164,8 +170,12 @@ fi
 
 echo "  等节点起来（最多 60 s）..."
 for i in $(seq 1 60); do
-  subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | awk '/Subscription count/{print \$3}'" 2>/dev/null)
-  board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | awk '/Publisher count/{print \$3}'" 2>/dev/null)
+  # ⚠️ 这里用 sed 不用 awk：命令要穿过 dc 的三层展开，写 awk '{print $3}' 的话
+  # 调用处转义成 \$3，到了接收端 shell **又会被展开一次**（无位置参数 → 空），
+  # awk 实际收到的是 `print `（打印整行），比较 = "1" 就永远不成立 ——
+  # 表现为“服务明明起来了但一直说没就绪”。sed 不需要 $，没有这个问题。
+  subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | sed -n 's/^Subscription count: *//p'" 2>/dev/null)
+  board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
   if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ]; then
     echo "  ✓ 任务已待命，感知在发板子位姿（${i}s）"; break
   fi
@@ -194,8 +204,8 @@ done
 fi
 
 # ================================================================ 终端 4：发目标
-subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | awk '/Subscription count/{print \$3}'" 2>/dev/null)
-board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | awk '/Publisher count/{print \$3}'" 2>/dev/null)
+subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | sed -n 's/^Subscription count: *//p'" 2>/dev/null)
+board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
 if [ "${subs:-0}" != "1" ] || [ "${board:-0}" = "0" ]; then
   echo "★ 服务没在跑。先在另一个终端起：tools/press_board.sh --serve [--live]"
   echo "   （按压任务订阅者=${subs:-0}，板子位姿发布者=${board:-0}）"
@@ -203,8 +213,8 @@ if [ "${subs:-0}" != "1" ] || [ "${board:-0}" = "0" ]; then
 fi
 
 # 任务会不会真动 —— 直接问它，不靠人记住
-task_exec=$(dc "timeout 6 ros2 param get /piper_press_button_demo execute 2>/dev/null | awk '{print \$NF}'" 2>/dev/null)
-task_hw=$(dc "timeout 6 ros2 param get /piper_press_button_demo hardware_enable 2>/dev/null | awk '{print \$NF}'" 2>/dev/null)
+task_exec=$(dc "timeout 6 ros2 param get /piper_press_button_demo execute 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
+task_hw=$(dc "timeout 6 ros2 param get /piper_press_button_demo hardware_enable 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
 echo "════ 瞄准 ════"
 echo "  按压任务现在： execute=$task_exec  hardware_enable=$task_hw"
 if [ "$LIVE" = "1" ] && [ "$task_exec" != "True" ]; then
