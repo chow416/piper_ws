@@ -12,9 +12,9 @@ Two questions have to be answered for each capture:
 `robot_state_publisher` already expands the URDF into a TF tree driven by
 `/joint_states`, so one `lookup_transform` gives the answer, and it stays
 correct if the URDF changes. The reference implementation that builds a
-`moveit::core::RobotState` by hand is in
-`reference/press_travel_monitor.cpp` if you ever need it outside ROS.
-
+  `moveit::core::RobotState` by hand lives in the production package at
+  `src/Piper_ros/src/piper_elevator_manipulation/src/press_travel_monitor.cpp`
+  if you ever need it outside ROS.
 Read joint angles BY NAME, never by index
 -----------------------------------------
 `JointState.position` is only meaningful next to `JointState.name`, and the
