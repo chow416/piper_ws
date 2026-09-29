@@ -19,7 +19,82 @@
 
 ---
 
-## 0. 前提检查
+## 最短路径：两条命令
+
+### 终端 1 —— 使能（全程别关）
+
+```bash
+sg docker -c 'docker exec -it piper_dev bash -lc "
+source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
+ros2 launch piper_hardware piper_real_bringup.launch.py \
+    enable_motors:=true command_speed_ratio:=20"'
+```
+
+⚠️ **这个终端决定机械臂的生死**：Ctrl-C 它 = 电机失能 = 臂靠重力下垂
+（j2/j3 掉到机械硬限位，末端约下垂 10cm，**关节处有夹点会夹手**）。
+做实验期间不要关。要收工先垫泡沫再 Ctrl-C。
+
+### 终端 2 —— 剩下全部
+
+```bash
+cd ~/piper_ws
+tools/press_board.sh                               # 干跑：完整规划，不动
+tools/press_board.sh --live                        # 真按下去
+tools/press_board.sh --live --offset-mm -3,0,0     # 瞄偏 3mm 再按
+tools/press_board.sh --down                        # 只清理
+```
+
+这一条命令干了原来三个终端的事（起任务 + 起感知 + 等就绪 + 瞄准 + 等结果），
+并且**退出时自动清干净** —— 包括那个不跟着 `ros2 launch` 退的 `move_group`，
+手动清过两次都漏了它。
+
+```
+════ 前提检查 ════
+  容器    Up 4 hours
+  can0    UP
+  相机    空闲
+  残留    干净
+  bringup 在跑（电机使能中）
+
+════ 启动 ════  execute=false hardware_enable=false
+  等节点起来（最多 60 s）...
+  ✓ 任务已待命，感知在发板子位姿（5s）
+
+════ 瞄准 ════
+板中心(相机系)  = (   -5.5,   +93.2,  +486.7) mm   共 206 帧，抖动 0.55 mm
+瞄准点(base系)  = ( +560.2,    -0.4,  +203.0) mm
+按压方向        = (+0.9976, -0.0659, +0.0190)
+当前杆尖        = ( +169.7,    -0.0,  +264.1) mm
+需要移动        = 395.3 mm
+
+════ 干跑完成 ════ 什么都没动。
+
+—— 已清理：press_button_hardware / press_button_demo / marker_locator / move_group
+—— bringup 仍在跑，机械臂使能中、保持位姿
+```
+
+**`--dry-run` 是默认值**。加 `--live` 才会真动。
+
+### 顺手：把样板收成一个词
+
+```bash
+source ~/piper_ws/tools/piper.sh       # 写进 ~/.bashrc 就一直在
+piper ros2 topic list
+piper python3 tools/press_board_centre.py --settle 6
+piper_check                            # 前提检查
+piper_down                             # 清理（不动 bringup）
+```
+
+---
+
+## 以下分步版（一般不需要，出了问题才用）
+
+`press_board.sh` 把下面四个终端收成了一个。但把每一段单独跑，出错时才能看出
+是哪一段。尤其：**手动切换干跑↔实机时，`move_group` 必须单独清。**
+
+---
+
+## 0. 前提检查（`press_board.sh` 会自己先跑一遍，不过就什么也不起）
 
 ```bash
 cd ~/piper_ws
@@ -262,7 +337,9 @@ python3 tools/press_board_centre.py --offset-mm -3,0,0 --settle 6 --publish
 | 距离读数整体放大 2.86 倍 | 有人用了同事那份退化的内参 | 用 `check_intrinsics.py` 体检 |
 | 落点在板子之外 | 手眼外参没套、或套错了坐标系 | 终端 D 的输出先过一遍 |
 
-**动作之前，永远先跑终端 D 的"只算不发"。** 它 10 行输出里能看出上面大半的问题。
+**动作之前，永远先跑一次干跑。** 它 10 行输出里能看出上面大半的问题。
+`tools/press_board.sh`（默认就是干跑）已经把前提检查、干跑、清理都包在里面了 ——
+只有它报错时，才需要回到上面前提检查那一节逐项查。
 
 ---
 
