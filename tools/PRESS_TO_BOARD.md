@@ -1,7 +1,24 @@
-# 按压标定板中心 —— 完整流程
+# 按压标定板中心 —— 指令集
 
-从冷启动到压杆落在板中心、再归位。这是目前唯一一条**端到端**验证整条
-视觉→手眼→运动链路的流程。
+按原来的五终端骨架排。**终端 0~2 原样不动**，终端 3 从「按压任务」扩成
+「按压服务」（多带一个感知节点），终端 4 从「手输目标点」换成「瞄准板中心」。
+
+| 终端 | 干什么 | 常驻 | 命令 |
+|---|---|---|---|
+| **0** | 自检 + can0 | 否 | `piper ros2 run piper_elevator_manipulation preflight_check.py` |
+| **1** | 硬件使能 + 控制器 | **是** | `ros2 launch piper_hardware piper_real_bringup.launch.py …` |
+| **2** | 归位 | 否 | `ros2 run piper_elevator_manipulation go_home.py` |
+| **3** | 按压服务（感知 + 按压任务） | **是** | `tools/press_board.sh --serve [--live]` |
+| **4** | 发目标点（瞄准板中心） | 否 | `tools/press_board.sh [--live]` |
+
+```bash
+# 一次性把 sg/docker/source 那串样板收成一个词（建议写进 ~/.bashrc）
+source ~/piper_ws/tools/piper.sh
+piper_check     # = 终端 0 的自检
+piper_down      # 清理终端 3 起的服务
+```
+
+---
 
 ## 它到底在验证什么
 
@@ -14,14 +31,33 @@
 | **手眼外参** | `T_flange_cam.json` | 落点整体偏；旋转错一点，落点随姿态漂几毫米到几厘米 |
 | 关节 / TF | URDF + `/joint_states` | 落点偏，且和姿态耦合 |
 
-**为什么用板中心**：板中心是整块板上**唯一不用量**的点 —— 它在板系里就是原点。
-贴一个按钮上去就得用尺子量，而那个量出来的误差，和我们要找的误差**分不开**。
+**为什么拿板中心当靶**：板中心是整块板上**唯一不用量**的点 —— 它在板系里就是
+原点。贴一个按钮上去就得用尺子量，而那个量出来的误差，和我们要找的误差
+**分不开**。
 
 ---
 
-## 最短路径：两条命令
+## 终端 0 —— 自检，开 can0
 
-### 终端 1 —— 使能（全程别关）
+```bash
+cd ~/piper_ws && source tools/piper.sh
+piper ros2 run piper_elevator_manipulation preflight_check.py
+sudo ip link set can0 up type can bitrate 1000000
+ip -details link show can0
+```
+
+⚠️ **每次插拔 can0 都会 down。** 判据是 IFF_UP 位——CAN 没有载波概念，
+看 `operstate` 会误判。
+
+⚠️ `preflight_check.py` 查的是**残留进程**。多出来的 `ros2_control_node` 或
+`move_group` 造成的症状是「臂反应很慢、卡在某个位姿不动」，看起来像控制器
+或规划问题，实际不是。
+
+也可以直接 `piper_check`（等价，少一次进容器）。
+
+---
+
+## 终端 1 —— 硬件使能 + 控制器（常驻，不要关）
 
 ```bash
 sg docker -c 'docker exec -it piper_dev bash -lc "
@@ -30,240 +66,117 @@ ros2 launch piper_hardware piper_real_bringup.launch.py \
     enable_motors:=true command_speed_ratio:=20"'
 ```
 
-⚠️ **这个终端决定机械臂的生死**：Ctrl-C 它 = 电机失能 = 臂靠重力下垂
-（j2/j3 掉到机械硬限位，末端约下垂 10cm，**关节处有夹点会夹手**）。
-做实验期间不要关。要收工先垫泡沫再 Ctrl-C。
-
-### 终端 2 —— 剩下全部
-
-```bash
-cd ~/piper_ws
-tools/press_board.sh                               # 干跑：完整规划，不动
-tools/press_board.sh --live                        # 真按下去
-tools/press_board.sh --live --offset-mm -3,0,0     # 瞄偏 3mm 再按
-tools/press_board.sh --down                        # 只清理
-```
-
-这一条命令干了原来三个终端的事（起任务 + 起感知 + 等就绪 + 瞄准 + 等结果），
-并且**退出时自动清干净** —— 包括那个不跟着 `ros2 launch` 退的 `move_group`，
-手动清过两次都漏了它。
-
-```
-════ 前提检查 ════
-  容器    Up 4 hours
-  can0    UP
-  相机    空闲
-  残留    干净
-  bringup 在跑（电机使能中）
-
-════ 启动 ════  execute=false hardware_enable=false
-  等节点起来（最多 60 s）...
-  ✓ 任务已待命，感知在发板子位姿（5s）
-
-════ 瞄准 ════
-板中心(相机系)  = (   -5.5,   +93.2,  +486.7) mm   共 206 帧，抖动 0.55 mm
-瞄准点(base系)  = ( +560.2,    -0.4,  +203.0) mm
-按压方向        = (+0.9976, -0.0659, +0.0190)
-当前杆尖        = ( +169.7,    -0.0,  +264.1) mm
-需要移动        = 395.3 mm
-
-════ 干跑完成 ════ 什么都没动。
-
-—— 已清理：press_button_hardware / press_button_demo / marker_locator / move_group
-—— bringup 仍在跑，机械臂使能中、保持位姿
-```
-
-**`--dry-run` 是默认值**。加 `--live` 才会真动。
-
-### 顺手：把样板收成一个词
-
-```bash
-source ~/piper_ws/tools/piper.sh       # 写进 ~/.bashrc 就一直在
-piper ros2 topic list
-piper python3 tools/press_board_centre.py --settle 6
-piper_check                            # 前提检查
-piper_down                             # 清理（不动 bringup）
-```
-
----
-
-## 以下分步版（一般不需要，出了问题才用）
-
-`press_board.sh` 把下面四个终端收成了一个。但把每一段单独跑，出错时才能看出
-是哪一段。尤其：**手动切换干跑↔实机时，`move_group` 必须单独清。**
-
----
-
-## 0. 前提检查（`press_board.sh` 会自己先跑一遍，不过就什么也不起）
-
-```bash
-cd ~/piper_ws
-
-# 容器在跑吗
-sg docker -c 'docker ps --filter name=piper_dev --format "{{.Names}} {{.Status}}"'
-
-# CAN 起来了吗（判据是 IFF_UP 位，不是 operstate —— CAN 没有载波概念）
-ip -details link show can0 | head -1
-python3 -c "print('can0 UP' if int(open('/sys/class/net/can0/flags').read().strip(),16)&1 else '★ can0 没起来')"
-# 没起来就：
-# sudo ip link set can0 up type can bitrate 1000000
-
-# 相机在吗、被占用吗
-v4l2-ctl --list-devices | grep -A2 -i orbbec
-fuser -v /dev/video2 2>/dev/null || echo "相机空闲"
-
-# ⚠️ 有没有残留的 ROS 进程（重复实例是老事故，见 docs）
-ps -eo pid,comm --no-headers | grep -E "ros2_control_no|move_group|marker_loca" || echo "干净"
-```
-
-⚠️ **相机是独占的。** 如果你开着 `python3 tools/cam_view.py` 看画面，先关掉它：
-
-```bash
-pkill -f cam_view.py
-```
-
-⚠️ **改过 config 一定要重新 colcon build** —— `ros2 run` 读的是 `install/` 里的那份：
-
-```bash
-sg docker -c 'docker exec piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && cd /ws && colcon build --packages-select piper_marker_perception"'
-```
-
----
-
-## 1. 终端 A —— 使能电机并保持位姿
-
-```bash
-sg docker -c 'docker exec -it piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-ros2 launch piper_hardware piper_real_bringup.launch.py \
-    enable_motors:=true command_speed_ratio:=20"'
-```
+等到 `Arm feedback received` + `Motors enabled` 两行。
 
 - **`command_speed_ratio:=20`** 是 20% 速度，调试期别开满。
 - ⚠️ **这个终端决定机械臂的生死**：Ctrl-C 它 = 电机失能 = 臂靠重力下垂
-  （j2/j3 会掉到机械硬限位，末端约下垂 10cm，**关节处有夹点会夹手**）。
-  做实验期间**不要关这个终端**。要收工先垫泡沫再 Ctrl-C。
-- 这个终端**必须留到最后**，中途 Ctrl-C 会让整条链路没数据。
+  （j2/j3 掉到机械硬限位，末端约下垂 10cm，**关节处有夹点会夹手**）。
+  要收工先垫泡沫再 Ctrl-C。
 
 ---
 
-## 2. 终端 B —— 起按压任务（先干跑！）
-
-第一次对准一个新目标，**一定要先干跑**。干跑会完整地算 IK 和轨迹，但不动。
+## 终端 2 —— 归位
 
 ```bash
-sg docker -c 'docker exec -it piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
-    target_source:=topic max_presses:=1 \
-    execute:=false hardware_enable:=false rviz:=false"'
+piper ros2 run piper_elevator_manipulation go_home.py
 ```
 
-看到这两行才算就绪：
+⚠️ **这一步不能省。** `go_home.py` 自己的说明写得很清楚：
 
-```
-Target source: topic '/press/target_pose', accepted frames world, base_link, ...
-Waiting for a press target on '/press/target_pose' (waiting indefinitely)...
-```
+> Enabling the motors does not move the arm anywhere; it holds whatever pose the
+> arm is already in, and **a parked arm rests with joint2 and joint3 pinned
+> against their stops.** This script drives the arm to a deliberate,
+> well-conditioned pose so the press task never has to plan from a degenerate
+> configuration.
 
-### 干跑 → 实机，怎么切换
-
-干跑和实机**不能同时跑**（会抢 `/press/target_pose`，而且两个 `move_group` 是
-老事故）。切换：
-
-```bash
-# 停掉当前这套
-sg docker -c 'docker exec piper_dev bash -lc "pkill -f press_button_hardware.launch.py"'
-sleep 3
-# ⚠️ move_group 不会跟着 launch 一起退，必须单独清
-sg docker -c 'docker exec piper_dev bash -lc "pkill -f move_group"'
-ps -eo pid,comm --no-headers | grep move_group || echo "已清干净"
-```
-
-然后换成实机版（**唯一区别是最后两个参数**）：
-
-```bash
-sg docker -c 'docker exec -it piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
-    target_source:=topic max_presses:=1 \
-    execute:=true hardware_enable:=true rviz:=false"'
-```
-
-- **`max_presses:=1`** —— 压一次就退出。别用 `0`（无限次），那是给人盯着屏幕连续按用的。
-- **`execute` 和 `hardware_enable` 是双闸门**，两个都得 true 才会动。
+实测过：使能后 j2 = 0.0095 rad，几乎就压在硬限位 `[0, 3.14]` 的 0 上。
+两个关节同时钉在限位上 → 5 自由度塌缩成 3 → 5D IK 解出来残差能有 4~11mm，
+**而它不会报错**，只会让落点偏。
 
 ---
 
-## 3. 终端 C —— 感知（找板子）
+## 终端 3 —— 按压服务（常驻，来一条目标按一次）
 
 ```bash
-sg docker -c 'docker exec -it piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-ros2 run piper_marker_perception marker_locator.py --ros-args \
-  --params-file /ws/install/piper_marker_perception/share/piper_marker_perception/config/marker_locator_orbbec.yaml"'
+cd ~/piper_ws
+tools/press_board.sh --serve          # 干跑：算 IK 和轨迹，但不动
+tools/press_board.sh --serve --live   # 实机：真按
 ```
 
-⚠️ **不要加 `target_frame:=base_link`。** 那会要求板子位姿走 TF 换算到 `base_link`，
-也就要求手眼外参已经在 URDF 里（我们还没写进去，见文末）。**现在发在相机光学系**，
-手眼由终端 D 的脚本显式施加 —— 这样只有一个变量。
+这一条命令起了两个节点（原来要在两个终端里分别敲）：
 
-启动日志应该看到：
+- `marker_locator` —— 感知，找板子，发 `/perception/board_pose`
+- `press_button_hardware.launch.py` —— 按压任务，`max_presses:=0` 常驻
+
+就绪后打印：
 
 ```
-intrinsics from .../camera_info_orbbec_640x480.yaml: CameraIntrinsics(fx=477.2, fy=477.7, ...)
-BoardSpec(DICT_4X4_50, 3x3, L=28.5mm, S=9.5mm, 104.5x104.5mm)
-lens 67.7 x 53.4 deg, fx=477.2 fy=477.7
-board at (+0.0140, +0.1047, +0.4253) m in 'wrist_depth_camera_optical_frame'
+════ 前提检查 ════
+  容器    Up 4 hours      can0    UP
+  相机    空闲             残留    干净
+  bringup 在跑（电机使能中）
+
+════ 起服务 ════  execute=false hardware_enable=false  max_presses=0
+  常驻：来一条目标按一次。
+  ✓ 任务已待命，感知在发板子位姿（5s）
+
+════ 服务常驻中 ════   另开一个终端发目标：
+     cd /home/zlf/piper_ws && tools/press_board.sh
+     cd /home/zlf/piper_ws && tools/press_board.sh --live
+  在这个终端里 Ctrl-C 会把服务连 move_group 一起清掉。
 ```
 
-⚠️ 相机独占 —— **这个终端和 `cam_view.py` 不能同时开**。
+⚠️ **这个终端 Ctrl-C 会清干净**，包括那个不跟着 `ros2 launch` 退的
+`move_group` —— 手动清过两次都漏了它。**绝不动 bringup。**
+
+⚠️ 相机独占：这个和 `python3 tools/cam_view.py` 不能同时开。
+
+⚠️ **别加 `target_frame:=base_link`。** 那要求手眼外参先进 URDF（见文末）。
+现在的板子位姿发在**相机光学系**，手眼由终端 4 的脚本显式施加 ——
+这样落点错了只有一个嫌疑人。
 
 ---
 
-## 4. 终端 D —— 瞄准（先只算不发）
+## 终端 4 —— 发目标点（瞄准板中心）
 
 ```bash
-sg docker -c 'docker exec piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-cd /ws && python3 tools/press_board_centre.py --settle 6"'
+cd ~/piper_ws
+tools/press_board.sh                  # 只算不发 —— 永远先跑这个
+tools/press_board.sh --live           # 真发出去
+tools/press_board.sh --live --offset-mm -3,0,0    # 瞄偏 3mm 再发
 ```
 
-不给 `--publish` 就**只算不发**，输出长这样：
-
 ```
-板中心(相机系)  = (  +14.0,  +104.7,  +425.3) mm   共 191 帧，抖动 0.21 mm
-瞄准点(base系)  = ( +497.3,   -18.3,  +203.2) mm
-按压方向        = (+0.9993, -0.0315, +0.0209)
+════ 瞄准 ════
+  按压任务现在： execute=True  hardware_enable=True
+板中心(相机系)  = (   -5.6,   +93.0,  +486.7) mm   共 194 帧，抖动 0.38 mm
+瞄准点(base系)  = ( +560.3,    -0.3,  +203.2) mm
+按压方向        = (+0.9975, -0.0681, +0.0162)
 当前杆尖        = ( +169.7,    -0.0,  +264.1) mm
-需要移动        = 333.7 mm
+需要移动        = 395.3 mm
 板系偏移        = (+0.0, +0.0, +0.0) mm
-（没给 --publish，只算不发）
+```
+
+**它会自己去问任务当前是什么模式**（`ros2 param get execute`），所以不会出现
+「你以为是实机、其实是干跑」这种状况。模式对不上会当场警告：
+
+```
+  ⚠️⚠️ 你给了 --live，但**任务自己是干跑模式**。
+       目标会发出去，臂不会动。要真按，把服务那个终端 Ctrl-C 后
+       用 tools/press_board.sh --serve --live 重起。
 ```
 
 看到这几样再往下走：
 
 | 该看什么 | 合理值 | 不对说明 |
 |---|---|---|
-| **抖动** | < 0.5 mm | > 2 mm 脚本会直接拒发 —— 板子在动，或有人在画面里 |
+| **抖动** | < 0.5 mm | > 2 mm 脚本直接拒发 —— 板子在动，或有人在画面里 |
 | **瞄准点** | 在 `[-0.30,-0.50,-0.02] ~ [0.65,0.50,0.80]` 内 | 出盒会被任务静默丢掉 |
-| **需要移动** | 几十到几百 mm | 明显偏大 → 板子不在视野正前方 |
+| **需要移动** | 几十到几百 mm | 明显偏大 → 板子不在视野正前方，或臂的起点太远 |
 | **按压方向** | 板子竖着 → 约 ±X；平放 → 约 −Z | 方向不对 → 板子朝向不对 |
+| **`execute`** | 要按就得是 `True` | 是 `False` → 服务是干跑起的 |
 
----
-
-## 5. 真正按下去
-
-```bash
-sg docker -c 'docker exec piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-cd /ws && python3 tools/press_board_centre.py --settle 6 --publish"'
-```
-
-**手放在电源开关附近。** 发出的瞬间机械臂就会开始动。
-
-终端 B 会依次打印（全程约 11~13 秒）：
+终端 3 那边会依次打印（全程约 11~13 秒）：
 
 ```
 free_motion.path_source=prerecorded
@@ -283,23 +196,22 @@ Press 1 finished with exit code 0.
 Target source '/press/target_pose': 0 message(s) rejected in total.
 ```
 
-**`Actual TCP at approach end` 那一行里的 `axial offset` 是控制器跟踪误差**，
-不是标定误差 —— 它量的是"实际到了没有"，而"该去哪"是标定说了算。
+**`Actual TCP at approach end` 那行的 `axial offset` 是控制器跟踪误差**，
+不是标定误差 —— 它量的是「实际到了没有」，而「该去哪」是标定说了算。
 实测约 **1.8 mm**。
 
 ---
 
-## 6. 验收
+## 验收
 
 **看杆尖在板上的落点。** 三个来源，从强到弱：
 
-1. **压痕**：3mm 压入会在纸上留一个 12mm 直径的凹痕。这是最直接的证据。
-2. **拍摄对比**：按前面 `/ws/log/board_before.png`，按后 `/ws/log/board_after.png`。
-   ⚠️ 板子是**靠着的、不是固定的**，按压会推动它（实测按后板子位移 75 mm），
+1. **压痕**：3mm 压入会在纸上留一个 12mm 直径的凹痕。最直接的证据。
+2. **拍摄对比**：按前 `/ws/log/board_before.png`，按后 `/ws/log/board_after.png`。
+   ⚠️ 板子是**靠着的、不是固定的**，按压会推动它（实测按后位移 **75 mm**），
    所以两张图**不能直接做差** —— 要先用 `detect_board.py` 解出各自的板子位姿，
    把压痕换算到**板系**去比，那才与板子挪到哪儿无关。
-3. **命令值**：终端 B 的 `Actual TCP` 和目标点的差 —— 只能说明控制器跟得上，
-   不能说明标定对。
+3. **命令值**：`Actual TCP` 和目标点的差 —— 只能说明控制器跟得上，不能说明标定对。
 
 想省事就放一张白纸在板中心再按，凹痕在白纸上最清楚。
 
@@ -307,20 +219,28 @@ Target source '/press/target_pose': 0 message(s) rejected in total.
 
 ## 微调
 
-全在这一个旋钮上 —— **板系**里的偏移，毫米：
+一个旋钮：**板系**里的偏移，毫米。
 
 ```bash
-# 往板系 -X 挪 3mm（"落点总是偏右就调这个"）
-python3 tools/press_board_centre.py --offset-mm -3,0,0 --settle 6 --publish
+tools/press_board.sh --offset-mm -3,0,0            # 先只算不发看一眼
+tools/press_board.sh --offset-mm -3,0,0 --live
 ```
 
-先不加 `--publish` 看一眼，确认方向对了再发。
-
-⚠️ **别用偏移去掩盖手眼外参的错误**。落点偏差如果是**随姿态变化**的
-（在不同位置按，偏的方向不一样），那是**旋转**错了，调偏移救不回来 ——
-应该重新标定手眼。偏移只能修**恒定**的偏差。
+⚠️ **别用偏移掩盖手眼外参的错误**。落点偏差如果**随姿态变化**（换个位置按，
+偏的方向就不一样），那是**旋转**错了，调偏移救不回来 —— 应该重新标定手眼。
+偏移只能修**恒定**的偏差。
 
 改手眼外参：直接编辑 `T_flange_cam.json`，**不用重新编译**，脚本每次读它。
+
+---
+
+## 随时可用
+
+```bash
+tools/press_board.sh --check      # 只做前提检查
+tools/press_board.sh --down       # 清理终端 3 起的服务（含 move_group）
+tools/press_board.sh --help
+```
 
 ---
 
@@ -330,25 +250,23 @@ python3 tools/press_board_centre.py --offset-mm -3,0,0 --settle 6 --publish
 |---|---|---|
 | `marker_locator` 打不开相机 | `cam_view.py` 占着 | `pkill -f cam_view.py` |
 | 改完 config 没生效 | `ros2 run` 读 `install/`，`colcon` 只复制不删除 | 重新 build；删过文件要 `rm -rf build/<pkg> install/<pkg>` |
-| `move_group` 杀了还在 | 它不跟着 `ros2 launch` 的 PID 退 | `pkill -f move_group` 单独清 |
-| 臂反应很慢 / 卡住不动 | **两个** `ros2_control_node` 或**两个** `move_group` 同时存在 | 见 `docs/`，用 `preflight_check.py` |
-| IK 解不出来 | j2/j3 压在硬限位上，5 自由度塌缩成 3 | 先 `go_home.py` 把关节挪开限位 |
+| `move_group` 杀了还在 | 它不跟着 `ros2 launch` 的 PID 退 | `piper_down` / `--down`（已自动） |
+| 臂反应很慢 / 卡住不动 | **两个** `ros2_control_node` 或**两个** `move_group` | `piper_check` |
+| IK 残差大、落点偏 | j2/j3 压在硬限位上，5 自由度塌缩成 3 | **终端 2 的 `go_home.py`** |
 | RViz 里机器人不动 | `use_sim_time` 默认 true，实机没人发 `/clock` | 确认 `use_sim_time:=false` |
-| 距离读数整体放大 2.86 倍 | 有人用了同事那份退化的内参 | 用 `check_intrinsics.py` 体检 |
-| 落点在板子之外 | 手眼外参没套、或套错了坐标系 | 终端 D 的输出先过一遍 |
-
-**动作之前，永远先跑一次干跑。** 它 10 行输出里能看出上面大半的问题。
-`tools/press_board.sh`（默认就是干跑）已经把前提检查、干跑、清理都包在里面了 ——
-只有它报错时，才需要回到上面前提检查那一节逐项查。
+| 距离读数整体放大 2.86 倍 | 有人用了那份退化的内参 | `check_intrinsics.py` 体检 |
+| 落点整体偏移 | 手眼外参没套、或套错了坐标系 | 终端 4 输出先过一遍 |
+| 落点在板子之外 | 板子太远、超出臂展 | 看「需要移动」那一行 |
 
 ---
 
 ## 下一步（还没做的）
 
 - **把手眼写进 URDF**：现在外参在脚本里显式施加。等数字稳定了，换算成
-  `T_flange<-camera_link`（机械系！文件里那份是光学系，直接抄会差 122°）
-  写进 `wrist_depth_camera.xacro` 的 `wrist_depth_camera_joint`，
-  之后 `marker_locator` 就能直接发在 `base_link`，这条脚本也可以退休。
+  `T_flange<-camera_link`（机械系！文件里那份是光学系，**直接抄会差 122°**）
+  写进 `wrist_depth_camera.xacro` 的 `wrist_depth_camera_joint`。之后
+  `marker_locator` 就能直接发在 `base_link`，终端 3 那个感知节点也能并进
+  `press_button_hardware.launch.py`，回到四个终端。
 - **手眼外参的置信度**：同事给的结果**没有质量指标**（没有散布、没有姿态转动量、
-  只报了一个方法）。要真正称得上"标定好了"，需要把采集会话拿过来重算一遍。
-  现在能说的是：它通过了这次端到端按压，落点误差在几毫米。
+  只报了一个方法）。要真正称得上「标定好了」，得把采集会话拿过来重算一遍。
+  现在能说的是：它通过了端到端按压，落点误差几毫米。

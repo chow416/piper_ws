@@ -1,39 +1,40 @@
 #!/usr/bin/env bash
 #
-# 一次完整的按压周期：起任务 → 起感知 → 瞄准 →（可选）按下去。
+# 按压标定板中心。按原来的五终端骨架排：
 #
-#   tools/press_board.sh                  # 干跑：完整规划，不动
-#   tools/press_board.sh --live           # 真机按下去
-#   tools/press_board.sh --live --offset-mm -3,0,0
-#   tools/press_board.sh --down           # 只清理
+#   终端 3（常驻）  tools/press_board.sh --serve [--live]
+#                   = 感知 marker_locator + 按压任务，来一条目标按一次
+#   终端 4          tools/press_board.sh [--live] [--offset-mm a,b,c]
+#                   = 瞄准板中心先看一眼；加 --live 才真发
+#   任意            tools/press_board.sh --check     # 只做前提检查
+#                   tools/press_board.sh --down      # 清理（含 move_group）
 #
-# 只做了一件事：把原本要在三个终端里分别敲的启动命令收进一个脚本，并且
-# **保证退出时清理干净**。清理这件事之前手动做过两次，两次都漏了 move_group
-# （它不跟着 ros2 launch 的 PID 退），于是下一个进程看到一个多余的规划器，
-# 症状是「臂反应很慢」—— 而真因要查很久才找得到。
+# 为什么要有这个脚本：原骨架里终端 3 和终端 4 之间还夹着一个感知节点，
+# 而且手动停服务时 **move_group 不跟着 ros2 launch 的 PID 退** —— 今天为此
+# 手动补了两刀。多出来的 move_group 造成的症状是「臂反应很慢、卡住不动」，
+# 看起来像控制器或规划问题，实际不是。--serve 退出走 trap，一定能清掉。
 #
-# ⚠️ 这个脚本**不动 bringup**。机械臂的使能开关（piper_real_bringup）在另一个
-# 终端里，那是操作者的急停手柄；脚本退出时臂仍然使能、仍然保持位姿，这是对的。
+# ⚠️ 不动 bringup。那是操作者的急停手柄，中断它电机会失能、臂会垂下来。
 
 set -uo pipefail
 
-DRY=1
 LIVE=0
+SERVE=0
 DOWN=0
-KEEP=0
+CHECK=0
 SETTLE=6
 OFFSET="0,0,0"
 WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --live)        LIVE=1; DRY=0 ;;
-    --dry-run)     DRY=1; LIVE=0 ;;
-    --down)        DOWN=1 ;;
-    --keep)        KEEP=1 ;;
-    --settle)      SETTLE="$2"; shift ;;
-    --offset-mm)   OFFSET="$2"; shift ;;
-    -h|--help)     sed -n '2,20p' "$0"; exit 0 ;;
+    --live)      LIVE=1 ;;
+    --serve)     SERVE=1 ;;
+    --down)      DOWN=1 ;;
+    --check)     CHECK=1 ;;
+    --settle)    SETTLE="$2"; shift ;;
+    --offset-mm) OFFSET="$2"; shift ;;
+    -h|--help)   sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "不认识的参数：$1"; exit 2 ;;
   esac
   shift
@@ -57,9 +58,11 @@ cleanup() {
 
 if [ "$DOWN" = "1" ]; then cleanup; exit 0; fi
 
-# ---------------------------------------------------------------- 前提
-echo "════ 前提检查 ════"
-bad=0
+# ---------------------------------------------------------------- 起服务前的前提
+# 起服务时要**没有**残留；瞄准时正好相反，服务必须**在**。两件事分开写。
+serve_preflight() {
+  local bad=0
+  echo "════ 前提检查 ════"
 status=$(sg docker -c 'docker ps --filter name=piper_dev --format "{{.Status}}"' 2>/dev/null)
 if [ -n "$status" ]; then echo "  容器    $status"; else echo "  容器    ✗ 没在跑"; bad=1; fi
 
@@ -91,19 +94,28 @@ else
   echo "  bringup 在跑（电机使能中）"
 fi
 
-if [ "$bad" = "1" ]; then echo; echo "★ 前提不满足，没起任何东西。"; exit 1; fi
+  return $bad
+}
 
+# ---------------------------------------------------------------- 路由
+if [ "$SERVE" = "1" ] || [ "$CHECK" = "1" ]; then
+  serve_preflight || { echo; echo "★ 前提不满足，没起任何东西。"; exit 1; }
+  if [ "$CHECK" = "1" ]; then echo; echo "—— 前提都满足。"; exit 0; fi
+fi
+
+# ================================================================ 终端 3：服务
+if [ "$SERVE" = "1" ]; then
 trap cleanup EXIT INT TERM
 
-# ---------------------------------------------------------------- 起节点
 if [ "$LIVE" = "1" ]; then EXEC=true; ENABLE=true; else EXEC=false; ENABLE=false; fi
 echo
-echo "════ 启动 ════  execute=$EXEC hardware_enable=$ENABLE"
+echo "════ 起服务 ════  execute=$EXEC hardware_enable=$ENABLE  max_presses=0"
+echo "  常驻：来一条目标按一次。"
 dc_bg "ros2 run piper_marker_perception marker_locator.py --ros-args \
   --params-file /ws/install/piper_marker_perception/share/piper_marker_perception/config/marker_locator_orbbec.yaml \
   > /tmp/ml.log 2>&1"
 dc_bg "ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
-  target_source:=topic max_presses:=1 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
+  target_source:=topic max_presses:=0 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
   > /tmp/press.log 2>&1"
 
 echo "  等节点起来（最多 60 s）..."
@@ -122,9 +134,37 @@ for i in $(seq 1 60); do
   fi
 done
 
-# ---------------------------------------------------------------- 瞄准
-echo
+  echo
+  echo "════ 服务常驻中 ════   另开一个终端发目标："
+  echo "     cd $WS_ROOT && tools/press_board.sh"
+  echo "     cd $WS_ROOT && tools/press_board.sh --live"
+  echo "  在这个终端里 Ctrl-C 会把服务连 move_group 一起清掉。"
+  while true; do sleep 3600; done
+fi
+
+# ================================================================ 终端 4：发目标
+subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | awk '/Subscription count/{print \$3}'" 2>/dev/null)
+board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | awk '/Publisher count/{print \$3}'" 2>/dev/null)
+if [ "${subs:-0}" != "1" ] || [ "${board:-0}" = "0" ]; then
+  echo "★ 服务没在跑。先在另一个终端起：tools/press_board.sh --serve [--live]"
+  echo "   （按压任务订阅者=${subs:-0}，板子位姿发布者=${board:-0}）"
+  exit 1
+fi
+
+# 任务会不会真动 —— 直接问它，不靠人记住
+task_exec=$(dc "timeout 6 ros2 param get /piper_press_button_demo execute 2>/dev/null | awk '{print \$NF}'" 2>/dev/null)
+task_hw=$(dc "timeout 6 ros2 param get /piper_press_button_demo hardware_enable 2>/dev/null | awk '{print \$NF}'" 2>/dev/null)
 echo "════ 瞄准 ════"
+echo "  按压任务现在： execute=$task_exec  hardware_enable=$task_hw"
+if [ "$LIVE" = "1" ] && [ "$task_exec" != "True" ]; then
+  echo
+  echo "  ⚠️⚠️ 你给了 --live，但**任务自己是干跑模式**。"
+  echo "       目标会发出去，臂不会动。要真按，把服务那个终端 Ctrl-C 后"
+  echo "       用 tools/press_board.sh --serve --live 重起。"
+elif [ "$LIVE" != "1" ] && [ "$task_exec" = "True" ]; then
+  echo "  （任务是实机模式，但这里没加 --live —— 所以只算不发）"
+fi
+
 if [ "$LIVE" = "1" ]; then PUB="--publish"; else PUB=""; fi
 dc "python3 tools/press_board_centre.py --settle $SETTLE --offset-mm $OFFSET $PUB"
 aim_rc=$?
@@ -133,12 +173,18 @@ if [ "$aim_rc" != "0" ]; then
   echo; echo "★ 瞄准脚本退出码 $aim_rc —— 没有发目标。"; exit $aim_rc
 fi
 
+if [ "$LIVE" != "1" ]; then
+  echo
+  echo "════ 只算不发 ════ 什么都没动。加 --live 才发。"
+  exit 0
+fi
+
 # ---------------------------------------------------------------- 等结果
 if [ "$LIVE" = "1" ]; then
   echo
   echo "════ 执行中 ════"
   for i in $(seq 1 40); do
-    if dc "grep -q 'Press 1 finished' /tmp/press.log" 2>/dev/null; then break; fi
+    if dc "grep -q 'Press .* finished' /tmp/press.log" 2>/dev/null; then break; fi
     sleep 1
   done
   echo
@@ -147,18 +193,5 @@ if [ "$LIVE" = "1" ]; then
   dc "grep -E 'Actual TCP at approach end' /tmp/press.log" 2>/dev/null \
     | sed 's/^/  → /'
   echo
-  echo "  ⚠️ 上面这行是**控制器跟踪误差**，不是标定误差。落点准不准要看板上的压痕。"
-else
-  echo
-  echo "════ 干跑完成 ════ 什么都没动。"
-  echo "  加 --live 才会真按。"
-fi
-
-# ---------------------------------------------------------------- 留或不留
-if [ "$KEEP" = "1" ]; then
-  echo
-  echo "—— --keep：节点都留着。再瞄一次（另开终端）："
-  echo "     cd $WS_ROOT && source tools/piper.sh && piper python3 tools/press_board_centre.py --settle $SETTLE"
-  echo "   Ctrl-C 结束并清理。"
-  while true; do sleep 3600; done
+  echo "  ⚠️ 这行是**控制器跟踪误差**，不是标定误差。落点准不准要看板上的压痕。"
 fi
