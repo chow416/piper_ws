@@ -28,4 +28,8 @@ button_colors_rgb.png
 **/.pytest_cache/
 *.py[cod]
 .vscode/
+
+# press_board.sh 的服务归属令牌（运行时文件，不该进版本库）
+.press_serve.owner
+.press_serve.lock
 .idea/

@@ -84,7 +84,35 @@ else
   dc_bg() { sg docker -c "docker exec -d piper_dev bash -lc \"$PRELUDE && $*\""; }
 fi
 
+# ---------------------------------------------------------------- 服务归属令牌
+# ⚠️ 这一段是整份脚本里唯一防止**自伤**的东西，要删先读完。
+#
+# 真实事故：后台残留了 9 个 --serve 实例，其中某一个退出时执行 cleanup 里的
+#   pkill -f '[m]ove_group'
+# 这条 pkill **按名字杀，不认主人**，于是把**后起**的那个 move_group 一起带走了。
+# 现场长这样（/tmp/press.log）：
+#   [move_group-1] You can start planning now!      ← 前 1.5 s 刚报就绪
+#   [move_group-1] [INFO] [rclcpp]: signal_handler(SIGINT/SIGTERM)   ← 收到信号
+#   moveit_cpp::MoveItCpp::~MoveItCpp() → Segmentation fault（exit -11）
+# 后果：任务端永远等不到规划场景，日志里只有
+#   Failed to acquire current PlanningScene within timeout of 3s
+# 臂一动不动，而报错把锅甩给 MoveIt 的析构段错误 —— 非常难查。
+#
+# 令牌文件放在**工作区里**而不是 /tmp：宿主看到 ~/piper_ws/.press_serve.owner，
+# 容器看到 /ws/.press_serve.owner —— bind mount，是同一个文件，两边才说得通。
+SERVE_OWNER_FILE="$WS_ROOT/.press_serve.owner"
+SERVE_TOKEN="$$-$(date +%s)"
+FORCE=0
+
 cleanup() {
+  # 只有**当前令牌的持有者**有资格动现场。令牌被别人拿走了，说明后来者已接管，
+  # 我们这种残留实例退出时必须闭嘴 —— 当初 move_group 就是这么被误杀的。
+  # --down 是操作者显式要求清场，用 FORCE=1 绕过令牌。
+  if [ "$FORCE" != "1" ] && [ "$(cat "$SERVE_OWNER_FILE" 2>/dev/null)" != "$SERVE_TOKEN" ]; then
+    echo
+    echo "—— 本实例（pid $$）已不是服务主人，退出时不做任何清理，避免误杀后起的服务。"
+    return 0
+  fi
   # ⚠️ 模式写成 '[p]ress…' 而不是 'press…'：pgrep/pkill -f 比的是**整条命令行**，
   # 而执行这条命令的 shell 自己的命令行里就有这个字符串。不加方括号的话，
   # 在容器里 `bash -lc "pgrep -af ros2_control_node"` 会匹配到那个 bash 自己。
@@ -101,9 +129,18 @@ cleanup() {
   else
     echo "—— ⚠️ bringup 没在跑 —— 机械臂现在是失能的（终端 1 起了吗？）"
   fi
+  rm -f "$SERVE_OWNER_FILE"
 }
 
-if [ "$DOWN" = "1" ]; then cleanup; exit 0; fi
+# 栈是不是齐的：两个关键节点都得在。
+stack_alive() {
+  dc "pgrep -f '[p]ress_button_demo'" >/dev/null 2>&1 || return 1
+  dc "pgrep -f '[m]ove_group'"        >/dev/null 2>&1 || return 1
+  return 0
+}
+
+# --down 是操作者显式要求清场：绕过令牌，无条件清。
+if [ "$DOWN" = "1" ]; then FORCE=1; cleanup; exit 0; fi
 
 # ---------------------------------------------------------------- 起服务前的前提
 # 起服务时要**没有**残留；瞄准时正好相反，服务必须**在**。两件事分开写。
@@ -156,7 +193,24 @@ fi
 
 # ================================================================ 终端 3：服务
 if [ "$SERVE" = "1" ]; then
+# 同一个服务起两份只会互抢相机、互踩任务节点，而且**后停的那份会把前一份的
+# move_group 杀掉**（见上面令牌说明）。所以这里先拦一道，别让它叠起来。
+#
+# 用 flock 而不是 pgrep 认亲兄弟。为什么：命令常常是包在包装 shell 里跑的
+# （run_in_terminal、某些终端会 `bash -lc "…"`），那个包装 shell 的命令行里
+# 同样含 'press_board.sh --serve'，只排除 $$ 会把自己判成「别人」——
+# 实测就这么误报过一次，把自己挡在门外。flock 认的是文件锁，不认命令行：
+# 进程一死锁自动放；宿主实例和容器实例共用同一个 inode，两边也能互斥。
+SERVE_LOCK_FILE="$WS_ROOT/.press_serve.lock"
+exec 9>"$SERVE_LOCK_FILE"
+if ! flock -n 9; then
+  echo "★ 已经有 --serve 在跑（锁 $SERVE_LOCK_FILE 被占），不再叠一份。"
+  echo "   用那个终端就好；真要推倒重来：tools/press_board.sh --down"
+  exit 1
+fi
+
 trap cleanup EXIT INT TERM
+echo "$SERVE_TOKEN" > "$SERVE_OWNER_FILE"
 
 if [ "$LIVE" = "1" ]; then EXEC=true; ENABLE=true; else EXEC=false; ENABLE=false; fi
 echo
@@ -185,12 +239,25 @@ for i in $(seq 1 60); do
   # 表现为“服务明明起来了但一直说没就绪”。sed 不需要 $，没有这个问题。
   subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | sed -n 's/^Subscription count: *//p'" 2>/dev/null)
   board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
-  if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ]; then
-    echo "  ✓ 任务已待命，感知在发板子位姿（${i}s）"; break
+  # move_group 必须**活着**：任务在 'capture live start state' 那一段要问它拿
+  # PlanningScene，拿不到就报 Failed to acquire current PlanningScene within
+  # timeout of 3s —— 那句话写在任务日志里，看着像任务的问题，其实是规划器不在。
+  # 只查订阅数/发布数是看不出这件事的，以前就是这么漏过去的。
+  mg=$(dc "timeout 4 pgrep -c -f '[m]ove_group'" 2>/dev/null)
+  if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ]; then
+    echo "  ✓ 任务已待命，感知在发板子位姿，move_group 在跑（${i}s）"; break
+  fi
+  # move_group 起来又死了的话别白等 60 s —— 日志里有现成的尸检报告。
+  if [ "${mg:-0}" = "0" ] && dc "grep -qE 'Segmentation fault|process has died' /tmp/press.log" 2>/dev/null; then
+    echo "  ✗ move_group 起过又死了 —— 规划器不在，任务会在 'capture live start state' 失败。"
+    echo "     日志里是这样："
+    dc "grep -E 'signal_handler|Segmentation fault|process has died' /tmp/press.log | tail -4 | cut -c1-140 | sed 's/^/       /'" 2>/dev/null
+    echo "     最常见原因：另一个 press_board.sh 实例退出时按名字 pkill 误杀。"
+    exit 1
   fi
   sleep 1
   if [ "$i" = "60" ]; then
-    echo "  ✗ 等了 60 s 还没就绪。看看："
+    echo "  ✗ 等了 60 s 还没就绪（任务订阅者=${subs:-0}，板子发布者=${board:-0}，move_group 进程=${mg:-0}）。看看："
     dc "grep -viE 'corrupt|Select' /tmp/press.log | tail -5" 2>/dev/null
     dc "grep -viE 'corrupt|Select' /tmp/ml.log | tail -5" 2>/dev/null
     exit 1
@@ -209,7 +276,29 @@ done
   echo "     cd $WS_ROOT && tools/press_board.sh"
   echo "     cd $WS_ROOT && tools/press_board.sh --live"
   echo "  在这个终端里 Ctrl-C 会把服务连 move_group 一起清掉。"
-  while true; do sleep 3600; done
+  # 常驻循环，但**不是**傻睡。本来就出过一次「终端 3 看着在运行、其实栈早死了」：
+  # move_group 被误杀后 ros2 launch 没重生它，press_button_demo 却还活着，
+  # 于是终端 4 每发一次都在 capture live start state 失败，而人以为服务好着。
+  # 每 5 s 摸一次脉，栈死了就主动退、把锁放掉，让操作者能干净重起。
+  # ⚠️ 两个都要摸：当初那条事故路径正是「move_group 死了、press_button_demo 还活着」，
+  # 只看任务节点根本发现不了 —— 终端 4 会一直在 capture live start state 失败，
+  # 而终端 3 这边岁月静好。
+  # ⚠️ 判死要**连着两次**：press_button_demo 比 move_group 晚约 7 s 才起（实测
+  #    t≈3 s / t≈10 s），单次采样撞上这个窗口、或者 dc 那一层偶发抽风，都会假报。
+  #    实测假报过一次，代价是好好的栈被自己清掉。
+  while true; do
+    sleep 5
+    if ! stack_alive; then
+      sleep 3
+      if ! stack_alive; then
+        echo
+        echo "⚠️ 服务栈不完整 —— press_button_demo 或 move_group 不在了。"
+        echo "   日志：/tmp/press.log 和 /tmp/ml.log。"
+        echo "   本终端即将退出并释放服务锁，请重起：tools/press_board.sh --serve [--live]"
+        exit 1
+      fi
+    fi
+  done
 fi
 
 # ================================================================ 终端 4：发目标
@@ -218,6 +307,16 @@ board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -
 if [ "${subs:-0}" != "1" ] || [ "${board:-0}" = "0" ]; then
   echo "★ 服务没在跑。先在另一个终端起：tools/press_board.sh --serve [--live]"
   echo "   （按压任务订阅者=${subs:-0}，板子位姿发布者=${board:-0}）"
+  exit 1
+fi
+
+# 规划器在不在 —— 不在的话现在就得拦住。否则目标发出去、臂一动不动，
+# 只在 /tmp/press.log 里留一句 Failed to acquire current PlanningScene。
+mg=$(dc "timeout 4 pgrep -c -f '[m]ove_group'" 2>/dev/null)
+if [ "${mg:-0}" = "0" ]; then
+  echo "★ move_group 不在跑 —— 现在发目标，任务会在 'capture live start state' 就失败："
+  echo "     Failed to acquire current PlanningScene within timeout of 3s"
+  echo "   去终端 3 重起服务：tools/press_board.sh --serve [--live]"
   exit 1
 fi
 
