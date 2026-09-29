@@ -10,7 +10,43 @@
 | **2** | 归位 | 否 | `ros2 run piper_elevator_manipulation go_home.py` |
 | **3** | 按压服务（感知 + 按压任务） | **是** | `tools/press_board.sh --serve [--live]` |
 | **4** | 发目标点（瞄准板中心） | 否 | `tools/press_board.sh [--live]` |
+---
 
+## ⚠️ 先搞清楚你在哪一层
+
+这套东西**横跨两层**，命令长得很像但只能在一边敲。提示符一眼能看出来：
+
+| 提示符 | 在哪 | `sg docker -c 'docker exec …'` 能用吗 |
+|---|---|---|
+| `zlf@zlf-ZhaoYang-X5-14-IAL:~/piper_ws$` | **宿主机** | ✅ 这就是它的用法 |
+| `dev@piper-dev:/ws$` | **容器里** | ❌ 会报 `sg: group 'docker' does not exist` |
+
+容器里没有 `docker` 这条命令，更没有 docker 组 —— **报的错和真因差得很远**，
+第一次碰到很难想到是层次错了。
+
+**下面终端 0~4 的所有命令两种层次都直接用**：`tools/press_board.sh` 和 `piper`
+自己会判断（判据是工作区在 `~/piper_ws` 还是 `/ws`）。
+
+只有一件事必须知道怎么转换：
+
+```bash
+# 从宿主机开一个容器里的交互 shell —— 进去后的提示符变 dev@piper-dev:/ws$
+sg docker -c 'docker exec -it piper_dev bash -l'
+
+# 从宿主机只跑一条命令
+sg docker -c 'docker exec -it piper_dev bash -lc "
+    source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
+    ros2 topic list"'
+```
+
+已经坐在容器里的话，**把外面两层剥掉，只留引号里的内容**：
+
+```
+宿主机:  sg docker -c 'docker exec -it piper_dev bash -lc "A && B"'
+容器内:  A && B
+```
+
+这是唯一需要手改的转换，其余都一样。
 ```bash
 # 一次性把 sg/docker/source 那串样板收成一个词（建议写进 ~/.bashrc）
 source ~/piper_ws/tools/piper.sh
@@ -60,10 +96,8 @@ ip -details link show can0
 ## 终端 1 —— 硬件使能 + 控制器（常驻，不要关）
 
 ```bash
-sg docker -c 'docker exec -it piper_dev bash -lc "
-source /opt/ros/humble/setup.bash && source /ws/install/setup.bash
-ros2 launch piper_hardware piper_real_bringup.launch.py \
-    enable_motors:=true command_speed_ratio:=20"'
+piper ros2 launch piper_hardware piper_real_bringup.launch.py \
+    enable_motors:=true command_speed_ratio:=20
 ```
 
 等到 `Arm feedback received` + `Motors enabled` 两行。

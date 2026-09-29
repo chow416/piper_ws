@@ -40,17 +40,41 @@ while [ $# -gt 0 ]; do
   shift
 done
 
+# ---------------------------------------------------------------- 我们在哪一层
+# 这个脚本两种敲法都要能跑：
+#   宿主机   ~/piper_ws/tools/press_board.sh   → 进容器跑
+#   容器里   /ws/tools/press_board.sh          → 就在本地跑
+#
+# 为什么非判不可：宿主机上要 `sg docker -c 'docker exec …'`，而容器里
+# **没有 docker 这条命令**，更没有 docker 组，敲下去只会得到
+# `sg: group 'docker' does not exist` —— 报的错和真因差得很远。
+# 判据是**工作区自己在哪**：宿主是 ~/piper_ws，容器里是 /ws。
+# ⚠️ 不要用 /opt/ros/humble 判断 —— 宿主上也装了 ROS（实测），会两边都判成容器。
+case "$WS_ROOT" in
+  /ws) IN_CONTAINER=1 ;;
+  *)   IN_CONTAINER=0 ;;
+esac
+
 PRELUDE='source /opt/ros/humble/setup.bash && source /ws/install/setup.bash && cd /ws'
 
-# 命令走 stdin 而不是 -c，因为传给它的命令里经常带单引号，
-# 而这里外面已经套了 sg 的双引号和 bash 的单引号 —— 三层引号叠起来必炸一次。
-dc()    { sg docker -c "docker exec -i piper_dev bash" <<<"$PRELUDE && $*"; }
-dc_bg() { sg docker -c "docker exec -d piper_dev bash -lc \"$PRELUDE && $*\""; }
+if [ "$IN_CONTAINER" = "1" ]; then
+  dc()    { ( eval "$PRELUDE && $*" ); }
+  dc_bg() { ( eval "$PRELUDE && $*" ) & }
+else
+  # 命令走 stdin 而不是 -c，因为传给它的命令里经常带单引号，
+  # 而这里外面已经套了 sg 的双引号和 bash 的单引号 —— 三层引号叠起来必炸一次。
+  dc()    { sg docker -c "docker exec -i piper_dev bash" <<<"$PRELUDE && $*"; }
+  dc_bg() { sg docker -c "docker exec -d piper_dev bash -lc \"$PRELUDE && $*\""; }
+fi
 
 cleanup() {
-  dc "pkill -f press_button_hardware.launch.py; pkill -f press_button_demo; pkill -f marker_locator.py" >/dev/null 2>&1
+  # ⚠️ 模式写成 '[p]ress…' 而不是 'press…'：pgrep/pkill -f 比的是**整条命令行**，
+  # 而执行这条命令的 shell 自己的命令行里就有这个字符串。不加方括号的话，
+  # 在容器里 `bash -lc "pgrep -af ros2_control_node"` 会匹配到那个 bash 自己。
+  # 方括号让正则匹配别人、不匹配字面量 '['，一个字符就解决了。
+  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'" >/dev/null 2>&1
   sleep 2
-  dc "pkill -f move_group" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
+  dc "pkill -f '[m]ove_group'" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
   echo
   echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / move_group"
   echo "—— bringup 仍在跑，机械臂使能中、保持位姿"
@@ -63,8 +87,12 @@ if [ "$DOWN" = "1" ]; then cleanup; exit 0; fi
 serve_preflight() {
   local bad=0
   echo "════ 前提检查 ════"
-status=$(sg docker -c 'docker ps --filter name=piper_dev --format "{{.Status}}"' 2>/dev/null)
-if [ -n "$status" ]; then echo "  容器    $status"; else echo "  容器    ✗ 没在跑"; bad=1; fi
+if [ "$IN_CONTAINER" = "1" ]; then
+  echo "  位置    容器内（「容器」那项跳过）"
+else
+  status=$(sg docker -c 'docker ps --filter name=piper_dev --format "{{.Status}}"' 2>/dev/null)
+  if [ -n "$status" ]; then echo "  容器    $status"; else echo "  容器    ✗ 没在跑"; bad=1; fi
+fi
 
 if python3 -c "import sys; sys.exit(0 if int(open('/sys/class/net/can0/flags').read().strip(),16)&1 else 1)" 2>/dev/null; then
   echo "  can0    UP"
@@ -78,7 +106,7 @@ else
   echo "  相机    空闲"
 fi
 
-left=$(dc "pgrep -a -f 'move_group|press_button|marker_locator'" 2>/dev/null)
+left=$(dc "pgrep -a -f '[m]ove_group|[p]ress_button|[m]arker_locator'" 2>/dev/null)
 if [ -n "$left" ]; then
   echo "  残留    ✗ 上一轮没清干净："; echo "$left" | sed 's/^/            /'
   echo "            —— 跑 tools/press_board.sh --down 清掉"; bad=1
@@ -86,8 +114,8 @@ else
   echo "  残留    干净"
 fi
 
-if ! pgrep -f "ros2_control_node" >/dev/null 2>&1 && \
-   ! dc "pgrep -f ros2_control_node" >/dev/null 2>&1; then
+if ! pgrep -f "[r]os2_control_node" >/dev/null 2>&1 && \
+   ! dc "pgrep -f '[r]os2_control_node'" >/dev/null 2>&1; then
   echo "  bringup ✗ 没在跑 —— 先在另一个终端起 piper_real_bringup（见 PRESS_TO_BOARD.md 第 1 节）"
   bad=1
 else

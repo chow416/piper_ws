@@ -8,8 +8,29 @@
 # 为什么要它：容器里的工作区是 /ws，ROS 在 /opt/ros/humble，还需要 source
 # install/setup.bash。这三件事每次都得写全，写漏 source 的表现是「命令找不到」
 # 或者更糟 —— 找到的是宿主上那份，报的错完全对不上。
+#
+# ⚠️ **两种层次都要能用**（2026-09-29 用户踩过）：
+#     宿主机提示符  zlf@zlf-ZhaoYang-X5-14-IAL:~/piper_ws$
+#     容器内提示符  dev@piper-dev:/ws$
+# 在**容器里**敲 `sg docker -c 'docker exec …'` 只会得到
+# `sg: group 'docker' does not exist` —— 因为容器里没有 docker 这条命令，
+# 更没有 docker 组。所以这里先判断层次，容器里就当普通函数用。
+#
+# 判据是**工具目录自己在哪**，不是 /opt/ros/humble —— 宿主上也装了 ROS，
+# 拿它当判据会两边都判成容器（实测踩过）。
+PIPER_TOOLS="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "$PIPER_TOOLS" in
+  /ws/tools) PIPER_IN_CONTAINER=1 ;;
+  *)         PIPER_IN_CONTAINER=0 ;;
+esac
 
 piper() {
+  if [ "$PIPER_IN_CONTAINER" = "1" ]; then
+    if [ $# -eq 0 ]; then exec bash -l; fi
+    ( source /opt/ros/humble/setup.bash && source /ws/install/setup.bash \
+      && cd /ws && eval "$*" )
+    return $?
+  fi
   if [ $# -eq 0 ]; then
     sg docker -c "docker exec -it piper_dev bash -l"
     return
@@ -23,43 +44,12 @@ piper() {
 }
 
 # 停掉所有会挡路的进程，但**不动 bringup** —— 那是机械臂的使能，停了臂会垂下来。
+# 转调 press_board.sh，它自己会判断在宿主机还是容器里，两处不用各维护一份。
 piper_down() {
-  sg docker -c "docker exec piper_dev bash -lc '
-    pkill -f press_button_hardware.launch.py
-    pkill -f press_button_demo
-    pkill -f marker_locator.py
-    sleep 1
-    pkill -f move_group
-    sleep 1
-  '"
-  echo "已停：press_button_hardware / press_button_demo / marker_locator / move_group"
-  echo "⚠️ bringup 仍然在跑 —— 机械臂还使能着，能动是正常的"
+  "$PIPER_TOOLS/press_board.sh" --down
 }
 
 # 前提检查。任何一项不过就别往下走。
 piper_check() {
-  local bad=0
-  echo "容器   $(sg docker -c 'docker ps --filter name=piper_dev --format "{{.Status}}"')"
-  if [ "$(cat /sys/class/net/can0/flags 2>/dev/null | python3 -c 'import sys;print(int(sys.stdin.read().strip(),16)&1)' 2>/dev/null)" = "1" ]; then
-    echo "can0    UP"
-  else
-    echo "can0    ✗ 没起来 —— sudo ip link set can0 up type can bitrate 1000000"
-    bad=1
-  fi
-  if fuser /dev/video2 >/dev/null 2>&1; then
-    echo "相机    ✗ 被占用 —— 先 pkill -f cam_view.py"
-    bad=1
-  else
-    echo "相机    空闲"
-  fi
-  local left
-  left=$(sg docker -c "docker exec piper_dev bash -lc 'pgrep -a -f \"move_group|press_button|marker_locator\"'" 2>/dev/null)
-  if [ -n "$left" ]; then
-    echo "残留    ✗ 上一轮没清干净："
-    echo "$left" | sed 's/^/          /'
-    bad=1
-  else
-    echo "残留    干净"
-  fi
-  return $bad
+  "$PIPER_TOOLS/press_board.sh" --check
 }
