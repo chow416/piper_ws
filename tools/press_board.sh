@@ -5,8 +5,9 @@
 #   终端 3（常驻）  tools/press_board.sh --serve [--live] [--no-view]
 #                   = 感知 marker_locator + 按压任务，来一条目标按一次
 #                     顺手把调试图转发到 http://127.0.0.1:8098/ 供观察
-#   终端 4          tools/press_board.sh [--live] [--offset-mm a,b,c]
-#                   = 瞄准板中心先看一眼；加 --live 才真发
+#   终端 4          tools/press_board.sh [--live] [--button NAME] [--offset-mm a,b,c]
+#                   = 瞄准板中心（或 board.yaml 里量好的某个按键）先看一眼；
+#                     加 --live 才真发
 #   任意            tools/press_board.sh --check     # 只做前提检查
 #                   tools/press_board.sh --down      # 清理（含 move_group）
 #
@@ -25,6 +26,7 @@ DOWN=0
 CHECK=0
 SETTLE=6
 OFFSET="0,0,0"
+BUTTON=""
 # 按压参数，单位**米**，和 launch 参数同名。默认值和 launch 默认值一致，
 # 不在这里偷偷不一样。安全 demo 用 --standoff 0.010 --depth 0.0015。
 STANDOFF=0.005
@@ -45,6 +47,9 @@ while [ $# -gt 0 ]; do
     --depth)     DEPTH="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
+    # 按 board.yaml 里量好的按键，而不是板心。这个名字会原样传给
+    # press_board_centre.py 的 --button。
+    --button)    BUTTON="$2"; shift ;;
     -h|--help)   sed -n '2,15p' "$0"; exit 0 ;;
     *) echo "不认识的参数：$1"; exit 2 ;;
   esac
@@ -383,7 +388,10 @@ pressed_before=$(dc "grep -c 'Press .* finished' /tmp/press.log" 2>/dev/null)
 pressed_before=${pressed_before:-0}
 
 if [ "$LIVE" = "1" ]; then PUB="--publish"; else PUB=""; fi
-dc "python3 tools/press_board_centre.py --settle $SETTLE --offset-mm $OFFSET $PUB"
+# ⚠️ 这里必须把 --button 一起透传下去。只加在 demo.sh 里是不够的 —— demo.sh 是
+# 通过本脚本去调瞄准脚本的，漏了这一层就是「不认识的参数：--button」。
+if [ -n "$BUTTON" ]; then BUTTON_ARG="--button $BUTTON"; else BUTTON_ARG=""; fi
+dc "python3 tools/press_board_centre.py --settle $SETTLE --offset-mm $OFFSET $PUB $BUTTON_ARG"
 aim_rc=$?
 
 if [ "$aim_rc" != "0" ]; then
