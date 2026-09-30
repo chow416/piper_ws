@@ -273,6 +273,14 @@ def main():
         # 单位是米。--offset-mm 是额外微调，照旧叠上去。
         tip_in_board = np.asarray(chosen.tip_in_board, dtype=float) + offset
         press_axis = np.asarray(chosen.press_axis_in_board, dtype=float)
+        # (0,0,0) 是个合法值 —— 它就是板心。所以"还没填数"和"有意让 marker
+        # 中心对准按键"看起来一模一样，而两者只差一个会不会按到板子中间去。
+        # 不拒绝（后者是真需求），但必须出声。
+        if not np.any(tip_in_board):
+            print("⚠️  targets.%s 的 tip_in_board 是 (0,0,0) —— 这等于"
+                  "**按板心**，不是按按键。\n"
+                  "    有意让 marker 中心对准按键就忽略这条；"
+                  "否则是还没把量到的数填进去。" % args.button)
         button_label = (f"按键 {args.button}（板系 tip="
                         f"({tip_in_board[0]*1000:+.1f}, {tip_in_board[1]*1000:+.1f}, "
                         f"{tip_in_board[2]*1000:+.1f}) mm，轴="
