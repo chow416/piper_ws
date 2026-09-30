@@ -348,13 +348,14 @@ cd /ws
 tools/press_board.sh --serve          # 干跑：算 IK 和轨迹，但不动
 tools/press_board.sh --serve --live   # 实机：真按
 
-# ⚠️ 按压参数**不在命令行上**。--standoff / --depth 仍然接受，但只要
-#    press_params.yaml 在，它们就不起作用（只留一条 WARN）。要改就改文件：
+# ⚠️ 按压参数**不在命令行上**。--standoff / --depth 会被**直接拒绝**（退出码 2），
+#    告诉你改哪个文件；想改行程就改那个文件：
 #      src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
 ```
 
-（`--standoff` / `--depth` 同名透传给 launch，但**只要配置文件在就被它盖掉**，
-只留一条 WARN。想真正改行程，改 `press_params.yaml`。）
+（这两个参数曾经是"接受但静默无效"—— 传了不报错，实际跑的是文件里那份，
+只在日志里留一条 WARN。那比报错坏得多：敲了一个看似生效的参数，屏幕上
+看不出任何异常。现在改成拒绝。）
 
 这一条命令起了两个节点（原来要在两个终端里分别敲）：
 

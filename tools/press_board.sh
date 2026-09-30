@@ -32,9 +32,10 @@ BUTTON=""
 # （实测 28.5 mm 的单码是 3.3 mm），于是闸门会误报"板子在动"。
 # 那种情况把小 marker 印大一点是治本，临时跑一次可以放宽这里。
 MAXJIT=2.0
-# 按压参数，单位**米**，和 launch 参数同名。默认值和 launch 默认值一致，
-# 不在这里偷偷不一样。⭐ 只要 config/press_params.yaml 在，下面这两个就
-# **完全不起作用** —— 想改按压行程请改那个文件。
+# 按压参数的**兵底默认值**，单位米，和 launch 参数同名。
+# ⚠️ 它们**不能从命令行改**（--standoff / --depth 会被拒绝）——
+#    那两个参数曾经存在过，但只要 press_params.yaml 在就完全不起作用，
+#    于是敲了没反应、屏幕上也看不出异常。现在只在**文件不在**时才用到它们。
 STANDOFF=0.005
 DEPTH=0.003
 VIEW=1            # --serve 时顺手把调试图转发到浏览器，--no-view 关掉
@@ -49,8 +50,19 @@ while [ $# -gt 0 ]; do
     --check)     CHECK=1 ;;
     --no-view)   VIEW=0 ;;
     --view-port) VIEW_PORT="$2"; shift ;;
-    --standoff)  STANDOFF="$2"; shift ;;
-    --depth)     DEPTH="$2"; shift ;;
+    # ⚠️ 这两个参数**故意拒绝**，和 demo.sh 保持一致。
+    #    它们曾经存在过，但自从按压参数搬进 press_params.yaml 之后，就变成
+    #    陷阱了：传了不会报错（launch 会收），但**配置文件优先**，实际跑的是
+    #    文件里那份，只在日志里留一条 WARN。用户敲了一个看似生效的参数、
+    #    屏幕上看不出任何异常 —— 这比直接报错坏得多。
+    #    文件不在时仍然有内置默认值兜底（见下面的 STANDOFF / DEPTH）。
+    --standoff|--depth)
+      echo "★ --standoff / --depth 已经搬到配置文件里了，不再从命令行传："
+      echo
+      echo "     src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+      echo
+      echo "   改那个文件，下一次按压就生效（不用重起服务、不用重新编译）。"
+      exit 2 ;;
     --settle)    SETTLE="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
     --max-jitter-mm) MAXJIT="$2"; shift ;;

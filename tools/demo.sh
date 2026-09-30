@@ -125,7 +125,7 @@ serve_flag=""
 [ "$LIVE" = "1" ] && serve_flag="--live"
 # shellcheck disable=SC2086
 # 按压参数不在这里传：它们在 config/press_params.yaml 里，节点每次按压前现读。
-# 传 --standoff/--depth 只会被那个文件盖掉，还多一条 WARN，所以干脆不传。
+# 传 --standoff/--depth 会被 press_board.sh 直接拒绝并退出，所以这里也不传。
 # 干跑/实机闸门**仍然只从命令行来**（--live），刻意不放进那个文件。
 "$PB" --serve $serve_flag > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
