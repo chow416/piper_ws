@@ -209,7 +209,7 @@ fi
 
 left=$(dc "pgrep -a -f 'lib/moveit_ros_move_group/move_group|lib/piper_elevator_manipulation/press_button_demo|lib/piper_marker_perception/marker_locator'" 2>/dev/null)
 if [ -n "$left" ]; then
-  echo "  残留    ✗ 上一轮没清干净："; echo "$left" | sed 's/^/            /'
+  echo "  残留    ✗ 上一轮没清干净（$(printf '%s\n' "$left" | wc -l) 个）："; echo "$left" | sed 's/^/            /'
   echo "            —— 跑 tools/press_board.sh --down 清掉"; bad=1
 else
   echo "  残留    干净"
@@ -361,9 +361,21 @@ fi
 # ================================================================ 终端 4：发目标
 subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | sed -n 's/^Subscription count: *//p'" 2>/dev/null)
 board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
-if [ "${subs:-0}" != "1" ] || [ "${board:-0}" = "0" ]; then
+if [ "${subs:-0}" = "0" ] || [ "${board:-0}" = "0" ]; then
   echo "★ 服务没在跑。先在另一个终端起：tools/press_board.sh --serve [--live]"
   echo "   （按压任务订阅者=${subs:-0}，板子位姿发布者=${board:-0}）"
+  exit 1
+fi
+# ⚠️ 订阅者是 2 的时侯**不是**"服务没在跑"，是"跑了两份" —— 这两个方向的修法
+#    完全相反，报错方向就是把人往坑里推：人会去重起那个"没在跑"的服务，
+#    叠上的这一份又不会报错，只会让每发一条目标**按两次**。
+#    实测就踩过：界面上写着"服务没在跑"，而真实原因是上一轮的 serve 没清干净
+#    （当时界面里的角括号里甚至已经写着"订阅者=2"，数据对了、结论错了）。
+if [ "${subs:-0}" != "1" ]; then
+  echo "★ 有 ${subs} 个按压任务在跑（应该正好 1 个）—— 上一轮没清干净。"
+  echo "   现在发目标会**按两次**；而且后停的那份退出时会顺手把前一份的"
+  echo "   move_group 一起带走（事件记录见脚本头的令牌说明）。"
+  echo "   先清场，再重起：tools/press_board.sh --down"
   exit 1
 fi
 

@@ -115,8 +115,12 @@ src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
 判据是日志里这一行变了：
 
 ```
-Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, contact standoff 25.0 mm, press depth 1.5 mm
+Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, contact standoff 25.0 mm, press depth 15.0 mm
 ```
+
+⚠️ 日志里的三个数一律是**毫米**，**不是**文件里的米。文件写 `0.015` ⇔ 日志说
+`15.0 mm`，是同一件事。反过来，**别拿文件里的注释去确认参数生效没有** ——
+注释写错了就是一条看着很真的假情报，而且它会被直接打到屏幕上。以日志为准。
 
 "不用重新编译"也成立，因为 `install/` 里那份是**符号链接**指回源码
 （`colcon --symlink-install`），编辑源码里的文件就是编辑运行时那个。
@@ -132,7 +136,7 @@ Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, cont
 ```
 接近起点 = 瞄准点 − approach_distance      (30 mm)
 按压起点 = 瞄准点 − contact_standoff       (25 mm)   ← 接近段停在这里
-按压终点 = 按压起点 + press_depth           (1.5 mm)  → 瞄准点前 23.5 mm
+按压终点 = 按压起点 + press_depth           (15 mm)   → 瞄准点前 10 mm
 ```
 
 ⇒ **调 standoff 会把整个按压段一起平移**，而 `press_depth` 始终是
@@ -337,11 +341,13 @@ cd /ws
 tools/press_board.sh --serve          # 干跑：算 IK 和轨迹，但不动
 tools/press_board.sh --serve --live   # 实机：真按
 
-# 安全 demo 的按压参数（接近段停在接触前 10 mm，只压 1.5 mm）
-tools/press_board.sh --serve --live --standoff 0.010 --depth 0.0015
+# ⚠️ 按压参数**不在命令行上**。--standoff / --depth 仍然接受，但只要
+#    press_params.yaml 在，它们就不起作用（只留一条 WARN）。要改就改文件：
+#      src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
 ```
 
-（`--standoff` / `--depth` 同名透传给 launch；不加就是默认 `0.005 / 0.003`。）
+（`--standoff` / `--depth` 同名透传给 launch，但**只要配置文件在就被它盖掉**，
+只留一条 WARN。想真正改行程，改 `press_params.yaml`。）
 
 这一条命令起了两个节点（原来要在两个终端里分别敲）：
 

@@ -341,6 +341,42 @@ def main():
         direction = base_camera[:3, :3] @ (board_camera @ press_axis)
         direction /= np.linalg.norm(direction)
 
+        # ── 码贴正了吗 ────────────────────────────────────────────────────
+        # 把码自己的 +Y（本应指向面板的"上坡"）投到 base 系，看它在**面板上**
+        # 转了多少。这一项完全静默：码在面板上转 5°，画面几乎没区别、位姿自洽、
+        # 重投影也小、连抖动都不变 —— 但 tip_in_board 会指错方向。
+        # 偏移 97 mm 时，转 5° 就是 8.5 mm 的落点横偏。
+        #
+        # ⚠️⚠️ 判据必须是"与**面板上坡方向**的夹角"，**不能**跟 base 竖直比。
+        # 板子靠在泡沫上时面板本身就斜（实测这块斜了 27°），码跟着面板一起斜是
+        # **正确的** —— 偏移和按压轴都在码的坐标系里，本来就该跟着面板走。
+        # 拿 base 竖直去比会把面板倾角也算成"码贴歪了"，让人去纠一个不存在的
+        # 问题（我第一版就是这么写的，差点报出去）。
+        axes_base = base_camera[:3, :3] @ board_camera
+        marker_up = axes_base[:, 1]
+        normal = axes_base[:, 2]
+        panel_tilt = math.degrees(math.asin(
+            max(-1.0, min(1.0, float(normal[2])))))
+        projected_up = np.array([0.0, 0.0, 1.0]) - float(normal[2]) * normal
+        print(f"面板倾角        = {panel_tilt:+.1f}°  （法线抬离水平面。靠在东西上时"
+              f"很大，**这不是误差**）")
+        if np.linalg.norm(projected_up) < 1e-6:
+            print("码在面板上的转角 = 算不出（面板几乎水平，上坡方向没有定义）")
+        else:
+            projected_up /= np.linalg.norm(projected_up)
+            in_plane = math.degrees(math.acos(max(-1.0, min(
+                1.0, float(np.dot(marker_up, projected_up))))))
+            offset_mm = float(np.linalg.norm(tip_in_board)) * 1000.0
+            print(f"码在面板上的转角 = {in_plane:5.1f}°   （0° = 贴得很正）")
+            if in_plane > 90.0:
+                print("  ⚠️⚠️ 码在面板上上下颠倒了 —— 偏移方向整个反了，先贴正")
+            elif in_plane > 3.0:
+                print(f"  ⚠️ 码在面板上转了 {in_plane:.1f}° —— 以 {offset_mm:.0f} mm "
+                      f"的偏移算，落点会横偏约 "
+                      f"{offset_mm * math.sin(math.radians(in_plane)):.1f} mm。"
+                      f"\n     最省事的修法：把码撕下来贴正（一条边平行于墙面的竖线）"
+                      f"\n     或者照码自己的边重新量 tip_in_board（见 board.yaml）")
+
         tip = flange[:3, :3] @ TCP_IN_FLANGE + flange[:3, 3]
         print(f"瞄准点(base系)  = ({target[0]*1000:+7.1f}, {target[1]*1000:+7.1f}, "
               f"{target[2]*1000:+7.1f}) mm")
