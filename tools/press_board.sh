@@ -120,9 +120,22 @@ cleanup() {
   # 而执行这条命令的 shell 自己的命令行里就有这个字符串。不加方括号的话，
   # 在容器里 `bash -lc "pgrep -af ros2_control_node"` 会匹配到那个 bash 自己。
   # 方括号让正则匹配别人、不匹配字面量 '['，一个字符就解决了。
-  dc "pkill -f '[p]ress_button_hardware.launch.py'; pkill -f '[p]ress_button_demo'; pkill -f '[m]arker_locator.py'; pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
+  # ⚠️⚠️ 模式必须**锚定到安装路径**，不能只写组件名。踩过的坑，代价是两次莫名
+  # 其妙的编译失败：
+  #   `pkill -f '[p]ress_button_demo'` 比的是**整条命令行**，而编译这个文件时
+  #   编译器的命令行里就带这个名字：
+  #     /usr/bin/c++ … -c …/src/press_button_demo.cpp -o …/press_button_demo.dir/…
+  #   于是某个残留实例的心跳一触发 cleanup，正在跑的 colcon build 就被 SIGTERM
+  #   打断，gmake 报 "Terminated" —— 看起来像编译器崩了，其实开枪的是自己人。
+  #   同理 `[m]ove_group` 会命中链接命令里的 libmoveit_ros_move_group.so。
+  #   锚到 install 下的可执行文件路径就不会误伤：编译命令行里不会出现
+  #   lib/<pkg>/<exe> 这种写法。
+  dc "pkill -f '[p]ress_button_hardware.launch.py'; \
+      pkill -f 'lib/piper_elevator_manipulation/press_button_demo'; \
+      pkill -f 'lib/piper_marker_perception/marker_locator'; \
+      pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
   sleep 2
-  dc "pkill -f '[m]ove_group'" >/dev/null 2>&1   # ⚠️ 不跟着 launch 退，必须单独来一下
+  dc "pkill -f 'lib/moveit_ros_move_group/move_group'" >/dev/null 2>&1
   # ⚠️ 残留的 --serve **外壳**也要收：它不是容器里那些节点，上面几个 pkill 都看不见
   # 它，而它拿着服务锁。不收的话下一轮 --serve 会被自己的锁挡在门外，报
   # 「已经有 --serve 在跑」，可现场其实早就空了 —— 看着像 bug，其实是残壳。
@@ -148,8 +161,11 @@ cleanup() {
 
 # 栈是不是齐的：两个关键节点都得在。
 stack_alive() {
-  dc "pgrep -f '[p]ress_button_demo'" >/dev/null 2>&1 || return 1
-  dc "pgrep -f '[m]ove_group'"        >/dev/null 2>&1 || return 1
+  # 同样锚到安装路径。编译/链接的命令行里会分别出现 press_button_demo 和
+  # move_group 两个词（源文件名、libmoveit_ros_move_group.so），只写组件名会在
+  # 构建期间假报“还活着”，心跳就失去了意义。
+  dc "pgrep -f 'lib/piper_elevator_manipulation/press_button_demo'" >/dev/null 2>&1 || return 1
+  dc "pgrep -f 'lib/moveit_ros_move_group/move_group'" >/dev/null 2>&1 || return 1
   return 0
 }
 
@@ -180,7 +196,7 @@ else
   echo "  相机    空闲"
 fi
 
-left=$(dc "pgrep -a -f '[m]ove_group|[p]ress_button|[m]arker_locator'" 2>/dev/null)
+left=$(dc "pgrep -a -f 'lib/moveit_ros_move_group/move_group|lib/piper_elevator_manipulation/press_button_demo|lib/piper_marker_perception/marker_locator'" 2>/dev/null)
 if [ -n "$left" ]; then
   echo "  残留    ✗ 上一轮没清干净："; echo "$left" | sed 's/^/            /'
   echo "            —— 跑 tools/press_board.sh --down 清掉"; bad=1
@@ -256,7 +272,7 @@ for i in $(seq 1 60); do
   # PlanningScene，拿不到就报 Failed to acquire current PlanningScene within
   # timeout of 3s —— 那句话写在任务日志里，看着像任务的问题，其实是规划器不在。
   # 只查订阅数/发布数是看不出这件事的，以前就是这么漏过去的。
-  mg=$(dc "timeout 4 pgrep -c -f '[m]ove_group'" 2>/dev/null)
+  mg=$(dc "timeout 4 pgrep -c -f 'lib/moveit_ros_move_group/move_group'" 2>/dev/null)
   if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ]; then
     echo "  ✓ 任务已待命，感知在发板子位姿，move_group 在跑（${i}s）"; break
   fi
@@ -325,7 +341,7 @@ fi
 
 # 规划器在不在 —— 不在的话现在就得拦住。否则目标发出去、臂一动不动，
 # 只在 /tmp/press.log 里留一句 Failed to acquire current PlanningScene。
-mg=$(dc "timeout 4 pgrep -c -f '[m]ove_group'" 2>/dev/null)
+mg=$(dc "timeout 4 pgrep -c -f 'lib/moveit_ros_move_group/move_group'" 2>/dev/null)
 if [ "${mg:-0}" = "0" ]; then
   echo "★ move_group 不在跑 —— 现在发目标，任务会在 'capture live start state' 就失败："
   echo "     Failed to acquire current PlanningScene within timeout of 3s"

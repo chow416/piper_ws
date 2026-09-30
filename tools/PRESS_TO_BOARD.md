@@ -99,15 +99,35 @@ tools/demo.sh --live --offset-mm -3,0,0     # 瞄偏 3mm 再按
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--standoff M` | **0.025** | 接近段停在瞄准点前这么远。默认值就是实测出来的那个（见下） |
-| `--depth M` | 0.0015 | 按压段行程 |
-| `--offset-mm a,b,c` | 0,0,0 | **板系**偏移，瞄准时现用，**改了不用重起** |
+| `--live` | 关 | 真按；不带就是干跑（照样算完整轨迹，但不动臂） |
+| `--offset-mm a,b,c` | 0,0,0 | **板系**偏移，瞄准时现用 |
 | `--settle` | 6 | 瞄准前稳定帧的时间 |
 
-⚠️ `--standoff` / `--depth` 是**启动参数**：改了要退出重跑（服务得重起）。
-`--offset-mm` 不用。
+### 🎛 按压参数在一个文件里 —— 改它，下一次按压就生效
 
-### ⚠️ 为什么 standoff 默认是 25 mm
+接近段 standoff、按压行程、接近起点 **不在命令行上**：
+
+```
+src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
+```
+
+**改完存盘即可。** 不用重起服务，不用重新编译 —— 节点每次按压前都重新读它。
+判据是日志里这一行变了：
+
+```
+Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, contact standoff 25.0 mm, press depth 1.5 mm
+```
+
+"不用重新编译"也成立，因为 `install/` 里那份是**符号链接**指回源码
+（`colcon --symlink-install`），编辑源码里的文件就是编辑运行时那个。
+文件里每个值都写明了允许区间和实测依据 —— 见文件本身的注释。
+
+⚠️ **`execute` / `hardware_enable` 故意不放进这个文件。** 那两道闸门必须每次在
+命令行上现敲（`tools/demo.sh --live`）。一个能活过本次会话的 `execute: true`，
+正是"只差一个马虎的 flag"那个隐患 —— 而这个 launch profile 的设计初衷就是避开它。
+（再说它们要是放进去，`--live` 会被文件静默盖掉，比不放还糟。）
+
+### ⚠️ 为什么 standoff 是 25 mm
 
 实测结论：**把接近段终点前移 25 mm，杆尖才差不多停在目标点前面。**
 也就是说，模型算出的杆尖位置比真实杆尖**靠后一个常数量**，约 25 mm。

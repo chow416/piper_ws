@@ -4,7 +4,14 @@
 #
 #   tools/demo.sh                 干跑：起服务 + 瞄准一次，机械臂不动
 #   tools/demo.sh --live          实机：起服务 + 真按一次
-#   tools/demo.sh --live --standoff 0.025 --depth 0.0015
+#   tools/demo.sh --offset-mm -3,0,0
+#
+# ⚠️ 按压参数（接近段 standoff、按压行程、干跑/实机）**不在命令行上**，在：
+#
+#      src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
+#
+#    改那个文件，**下一次按压就生效** —— 不用重起服务、不用重新编译。
+#    节点每次按压前都会重新读它。
 #
 # 按完**不退出**，停在交互循环里（那时服务还在，回车就能再按一次）：
 #
@@ -16,28 +23,27 @@
 # 目标」，中间没有任何需要人盯着的地方。分开的唯一后果是多一个窗口、多一处忘记
 # 回收 —— 历史上那个把**后起**的 move_group 按名字误杀的残留实例，就是这么来的。
 #
-# ⚠️ --standoff / --depth 是**启动参数**，改它们要重起服务（退出本脚本再跑一次）。
-#    --offset-mm 不用，它每次瞄准现用。
-#
-# ⚠️ standoff 默认 0.025 不是随便写的：实测把接近段终点前移 25 mm，杆尖才差不多
-#    停在目标点前面（见 PRESS_TO_BOARD.md）。默认值跟着实测走。
+# ⚠️ --offset-mm 不用重起，它每次瞄准时现用。
 
 set -uo pipefail
 
 LIVE=0
-STANDOFF=0.025
-DEPTH=0.0015
 OFFSET="0,0,0"
 SETTLE=6
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --live)      LIVE=1 ;;
-    --standoff)  STANDOFF="$2"; shift ;;
-    --depth)     DEPTH="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
-    -h|--help)   sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
+    --standoff|--depth)
+      echo "★ --standoff / --depth 已经搬到配置文件里了，不再从命令行传："
+      echo
+      echo "     src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+      echo
+      echo "   改那个文件，下一次按压就生效（不用重起服务、不用重新编译）。"
+      exit 2 ;;
     *) echo "不认识的参数：$1"; exit 2 ;;
   esac
   shift
@@ -45,6 +51,7 @@ done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PB="$HERE/press_board.sh"
+PARAMS_FILE="$(cd "$HERE/.." && pwd)/src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
 SERVE_LOG=/tmp/demo_serve.log
 SERVE_PID=""
 
@@ -79,7 +86,10 @@ echo "════ 起服务（原终端 3）════"
 serve_flag=""
 [ "$LIVE" = "1" ] && serve_flag="--live"
 # shellcheck disable=SC2086
-"$PB" --serve $serve_flag --standoff "$STANDOFF" --depth "$DEPTH" > "$SERVE_LOG" 2>&1 &
+# 按压参数不在这里传：它们在 config/press_params.yaml 里，节点每次按压前现读。
+# 传 --standoff/--depth 只会被那个文件盖掉，还多一条 WARN，所以干脆不传。
+# 干跑/实机闸门**仍然只从命令行来**（--live），刻意不放进那个文件。
+"$PB" --serve $serve_flag > "$SERVE_LOG" 2>&1 &
 SERVE_PID=$!
 
 ready=0
@@ -100,6 +110,18 @@ if [ "$ready" != "1" ]; then
   echo "  ✗ 等了 90 s 还没就绪。日志（$SERVE_LOG）尾巴："
   tail -20 "$SERVE_LOG" | sed 's/^/     /'
   exit 1
+fi
+
+echo
+# 把配置文件里的值原样摆出来 —— 操作者要的就是"现在到底会怎么按"。
+if [ -f "$PARAMS_FILE" ]; then
+  echo "════ 按压参数（来自配置文件）════"
+  grep -E '^[a-z_]+:' "$PARAMS_FILE" | sed 's/^/  /'
+  echo "  文件：$PARAMS_FILE"
+  echo "  ★ 改这个文件，下一次按压就生效，不用重起。"
+else
+  echo "  ⚠️ 配置文件不在：$PARAMS_FILE"
+  echo "     节点会退回 launch 参数（默认 standoff 5 mm / depth 4 mm）。"
 fi
 
 echo
