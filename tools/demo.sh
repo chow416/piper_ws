@@ -4,7 +4,7 @@
 #
 #   tools/demo.sh                 干跑：起服务 + 瞄准一次，机械臂不动
 #   tools/demo.sh --live          实机：起服务 + 真按一次
-#   tools/demo.sh --live --button red     按 board.yaml 里量好的那个按键，而不是板心
+#   tools/demo.sh --live --button call   按 board.yaml 里量好的那个按键，而不是板心
 #   tools/demo.sh --offset-mm -3,0,0
 #
 # ⚠️ 按压参数（接近段 standoff、按压行程、干跑/实机）**不在命令行上**，在：

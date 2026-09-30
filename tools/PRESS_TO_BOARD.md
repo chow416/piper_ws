@@ -188,14 +188,23 @@ src/Piper_ros/src/piper_marker_perception/config/board.yaml
 
 ```yaml
 targets:
-  red:
-    taught: true                 # ← 量完改成 true，否则会被拦住
+  call:                      # 名字随便起，命令行用 --button <名字> 指定
+    taught: true             # ← 量完改成 true，否则会被拦住
     tip_in_board: {x: 0.000, y: 0.080, z: 0.000}      # 杆尖该落到的点，**米**
     press_axis_in_board: {x: 0.0, y: 0.0, z: -1.0}    # 往哪个方向压，板系单位向量
 ```
 
-板系约定（代码里钉死了，别改）：原点 = 板心，+X 右，+Y 上，
-**+Z 垂直板面向外（朝观察者）**。所以默认按压轴 `(0,0,-1)` 就是"往板面里压"。
+板系约定（代码里钉死了，别改）：
+
+```
+原点 = 板心
++X  向右（面向板子看）
++Y  向上
++Z  垂直板面向外，指向你（观察者）
+```
+
+⇒ 所以"往板面里压" = 板系的 **−Z**，这就是默认轴 `(0, 0, -1)` 的来历，不是随便填的。
+⇒ 板子贴反了会差 180°，而四元数看起来仍然"正常" —— 只能靠实测抓。
 
 ### 三个字段怎么理解
 
@@ -215,8 +224,8 @@ targets:
 ### 用起来
 
 ```bash
-cd /ws && tools/demo.sh --button red            # 只算不发，先看数字
-cd /ws && tools/demo.sh --button red --live     # 真按
+cd /ws && tools/demo.sh --button call            # 只算不发，先看数字
+cd /ws && tools/demo.sh --button call --live     # 真按
 ```
 
 它和板心模式共用**除了"板系里那个点 + 轴"以外的全部**：同一个手眼、同一个抖动门、
@@ -225,9 +234,9 @@ cd /ws && tools/demo.sh --button red --live     # 真按
 ⚠️ `taught: false` 时会被**拦住**，不会拿占位坐标去压：
 
 ```
-targets.red 还是 taught: false —— 那是占位值，不是量出来的。
+targets.call 还是 taught: false —— 那是占位值，不是量出来的。
 量完把 .../board.yaml 里那个 taught 改成 true 再跑。
-教示工具：ros2 run piper_marker_perception teach_press_offset.py --name red
+教示工具：ros2 run piper_marker_perception teach_press_offset.py --name call
 ```
 
 （`teach_press_offset.py` 可以用机械臂自己量这个关系 —— 把杆尖挪到按键上，
