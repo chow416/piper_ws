@@ -56,7 +56,7 @@ sg docker -c 'docker exec -it piper_dev bash -lc "
 ```
 
 这是唯一需要手改的转换，其余都一样。
-```
+
 ```bash
 # 一次性把 sg/docker/source 那串样板收成一个词（建议写进 ~/.bashrc）
 # ⚠️ 只在**宿主机**有用 —— 容器里没有 piper 这个命令（实测）
