@@ -38,6 +38,7 @@ LIVE=0
 OFFSET="0,0,0"
 SETTLE=6
 BUTTON_ARG=()
+JITTER_ARG=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -45,6 +46,10 @@ while [ $# -gt 0 ]; do
     --offset-mm) OFFSET="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --button)    BUTTON_ARG=(--button "$2"); shift ;;
+    # 稳定性闸门，毫米。默认 2.0 是按 3×3 标定板的噪声底定的；
+    # 单个小 marker 的噪声底高得多（28.5 mm 的单码实测 3.3 mm），
+    # 会被误报成"板子在动"。
+    --max-jitter-mm) JITTER_ARG=(--max-jitter-mm "$2"); shift ;;
     -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
     --standoff|--depth)
       echo "★ --standoff / --depth 已经搬到配置文件里了，不再从命令行传："
@@ -83,7 +88,7 @@ press_once() {
   local flag=""
   [ "$LIVE" = "1" ] && flag="--live"
   # shellcheck disable=SC2086
-  "$PB" $flag --settle "$SETTLE" --offset-mm "$OFFSET" "${BUTTON_ARG[@]}"
+  "$PB" $flag --settle "$SETTLE" --offset-mm "$OFFSET" "${BUTTON_ARG[@]}" "${JITTER_ARG[@]}"
 }
 
 # ---------------------------------------------------------------- 起服务

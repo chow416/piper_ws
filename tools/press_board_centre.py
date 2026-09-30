@@ -307,8 +307,17 @@ def main():
               f"   共 {frames} 帧，抖动 {jitter:.2f} mm")
         if jitter > args.max_jitter_mm:
             raise SystemExit(
-                f"★ 板子位姿抖动 {jitter:.1f} mm 超过 {args.max_jitter_mm:.1f} mm"
-                " —— 板子在动，或者有人在画面里。等它稳住再跑。")
+                f"★ 板子位姿抖动 {jitter:.1f} mm 超过 {args.max_jitter_mm:.1f} mm。\n"
+                "  两种可能，先分清楚再决定动不动：\n"
+                "   ① 码真的在动（刚贴上去还没稳、背后是软的、或有人在画面里）\n"
+                "      → 等它稳住再来\n"
+                "   ② 码很稳，但它是**单个小 marker** —— 噪声底本身就高。\n"
+                "      实测：3×3 标定板 0.3~1.3 mm，单个 28.5 mm 码 3.3 mm。\n"
+                "      这种情况下这是**精度真的差**，不是误报。\n"
+                "      临时想让这一轮跑起来：--max-jitter-mm <更大的数>\n"
+                "      治本：把码印大，或换回 3×3 板 —— 位姿精度基本正比于\n"
+                "      角点铺开的范围（3×3 板是 36 个角点铺在 104 mm 上，\n"
+                "      单码是 4 个角点挤在 24 px 里）。")
 
         transform = aim.flange_in_base().transform
         t = transform.translation

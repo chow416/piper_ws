@@ -27,6 +27,11 @@ CHECK=0
 SETTLE=6
 OFFSET="0,0,0"
 BUTTON=""
+# ⚠️ 这个闸门看的是"板子在不在动"，而它的默认值是按 3×3 标定板的噪声底
+# （实测 0.3~1.3 mm）定的。换成**单个小 marker** 后噪声底会高得多
+# （实测 28.5 mm 的单码是 3.3 mm），于是闸门会误报"板子在动"。
+# 那种情况把小 marker 印大一点是治本，临时跑一次可以放宽这里。
+MAXJIT=2.0
 # 按压参数，单位**米**，和 launch 参数同名。默认值和 launch 默认值一致，
 # 不在这里偷偷不一样。安全 demo 用 --standoff 0.010 --depth 0.0015。
 STANDOFF=0.005
@@ -47,6 +52,7 @@ while [ $# -gt 0 ]; do
     --depth)     DEPTH="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --offset-mm) OFFSET="$2"; shift ;;
+    --max-jitter-mm) MAXJIT="$2"; shift ;;
     # 按 board.yaml 里量好的按键，而不是板心。这个名字会原样传给
     # press_board_centre.py 的 --button。
     --button)    BUTTON="$2"; shift ;;
@@ -391,7 +397,7 @@ if [ "$LIVE" = "1" ]; then PUB="--publish"; else PUB=""; fi
 # ⚠️ 这里必须把 --button 一起透传下去。只加在 demo.sh 里是不够的 —— demo.sh 是
 # 通过本脚本去调瞄准脚本的，漏了这一层就是「不认识的参数：--button」。
 if [ -n "$BUTTON" ]; then BUTTON_ARG="--button $BUTTON"; else BUTTON_ARG=""; fi
-dc "python3 tools/press_board_centre.py --settle $SETTLE --offset-mm $OFFSET $PUB $BUTTON_ARG"
+dc "python3 tools/press_board_centre.py --settle $SETTLE --max-jitter-mm $MAXJIT --offset-mm $OFFSET $PUB $BUTTON_ARG"
 aim_rc=$?
 
 if [ "$aim_rc" != "0" ]; then
