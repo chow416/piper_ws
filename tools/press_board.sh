@@ -244,8 +244,21 @@ echo "$SERVE_TOKEN" > "$SERVE_OWNER_FILE"
 if [ "$LIVE" = "1" ]; then EXEC=true; ENABLE=true; else EXEC=false; ENABLE=false; fi
 echo
 echo "════ 起服务 ════  execute=$EXEC hardware_enable=$ENABLE  max_presses=0"
-echo "  contact_standoff_m=$STANDOFF   （接近段停在瞄准点之前这么远）"
-echo "  press_depth=$DEPTH   （按压段越过瞄准点的行程）"
+# ⚠️ 这里**不要**印 $STANDOFF / $DEPTH。那两个是 launch 参数，而只要
+# config/press_params.yaml 在，**配置文件优先**，launch 参数根本不起作用 ——
+# 印出来就是骗人。踩过：横幅写着 standoff 5 mm，实际跑的是文件里的 25 mm，
+# 而人看着横幅去判断"现在压多深"。
+PRESS_PARAMS="$WS_ROOT/src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+if [ -f "$PRESS_PARAMS" ]; then
+  echo "  按压参数来自配置文件（★ 改它，下一次按压就生效）："
+  grep -E '^(contact_standoff_m|press_depth|approach_distance):' "$PRESS_PARAMS" \
+    | sed 's/^/    /'
+  echo "    $PRESS_PARAMS"
+else
+  echo "  ⚠️ 配置文件不在（$PRESS_PARAMS）—— 退回 launch 参数："
+  echo "    contact_standoff_m=$STANDOFF   （接近段停在瞄准点之前这么远）"
+  echo "    press_depth=$DEPTH   （按压段越过瞄准点的行程）"
+fi
 echo "  常驻：来一条目标按一次。"
 dc_bg "ros2 run piper_marker_perception marker_locator.py --ros-args \
   --params-file /ws/install/piper_marker_perception/share/piper_marker_perception/config/marker_locator_orbbec.yaml \

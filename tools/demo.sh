@@ -4,6 +4,7 @@
 #
 #   tools/demo.sh                 干跑：起服务 + 瞄准一次，机械臂不动
 #   tools/demo.sh --live          实机：起服务 + 真按一次
+#   tools/demo.sh --live --button red     按 board.yaml 里量好的那个按键，而不是板心
 #   tools/demo.sh --offset-mm -3,0,0
 #
 # ⚠️ 按压参数（接近段 standoff、按压行程、干跑/实机）**不在命令行上**，在：
@@ -12,6 +13,12 @@
 #
 #    改那个文件，**下一次按压就生效** —— 不用重起服务、不用重新编译。
 #    节点每次按压前都会重新读它。
+#
+# ⚠️ --button 的几何（按键相对板子在哪、往哪个方向压）在另一个文件：
+#
+#      src/Piper_ros/src/piper_marker_perception/config/board.yaml
+#
+#    量完把对应的 taught 改成 true，否则会被拦住（那是占位值，不是量出来的）。
 #
 # 按完**不退出**，停在交互循环里（那时服务还在，回车就能再按一次）：
 #
@@ -30,12 +37,14 @@ set -uo pipefail
 LIVE=0
 OFFSET="0,0,0"
 SETTLE=6
+BUTTON_ARG=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --live)      LIVE=1 ;;
     --offset-mm) OFFSET="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
+    --button)    BUTTON_ARG=(--button "$2"); shift ;;
     -h|--help)   sed -n '2,20p' "$0"; exit 0 ;;
     --standoff|--depth)
       echo "★ --standoff / --depth 已经搬到配置文件里了，不再从命令行传："
@@ -74,7 +83,7 @@ press_once() {
   local flag=""
   [ "$LIVE" = "1" ] && flag="--live"
   # shellcheck disable=SC2086
-  "$PB" $flag --settle "$SETTLE" --offset-mm "$OFFSET"
+  "$PB" $flag --settle "$SETTLE" --offset-mm "$OFFSET" "${BUTTON_ARG[@]}"
 }
 
 # ---------------------------------------------------------------- 起服务
@@ -113,6 +122,9 @@ if [ "$ready" != "1" ]; then
 fi
 
 echo
+if [ "${#BUTTON_ARG[@]}" -gt 0 ]; then
+  echo "  ★ 按压对象：按键 ${BUTTON_ARG[1]}（来自 board.yaml），不是板心"
+fi
 # 把配置文件里的值原样摆出来 —— 操作者要的就是"现在到底会怎么按"。
 if [ -f "$PARAMS_FILE" ]; then
   echo "════ 按压参数（来自配置文件）════"

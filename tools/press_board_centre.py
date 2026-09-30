@@ -25,12 +25,22 @@ URDF. Two reasons:
 Once the numbers stop moving, move it into the URDF and delete the conversion.
 Until then, "fine tune" means editing one JSON.
 
-Why the board centre rather than a button taped to it
------------------------------------------------------
-Because the board centre is the only point on the board whose position in the
-board frame is known without measuring anything: it is the origin. A taped-on
-button needs a tape measure, and that measurement would be indistinguishable
-from the error we are trying to find.
+Why the board centre is still the default
+-----------------------------------------
+Because it is the only point on the board whose position in the board frame is
+known without measuring anything: it is the origin. That is what makes it the
+right target while the camera, the intrinsics and the hand-eye are the things
+under test -- a taped-on button needs a tape measure, and that measurement
+would be indistinguishable from the error we are trying to find.
+
+Once the chain is trusted, the button is what you actually want to press, and
+that is what `--button` is for. It reads the board-to-button transform from
+`config/board.yaml` (`targets.<name>.tip_in_board` and `press_axis_in_board`)
+instead of aiming at the origin, and it refuses to run on a target still marked
+`taught: false` -- those coordinates are placeholders, not measurements.
+
+The two modes share everything: the same hand-eye, the same jitter gate, the
+same workspace box. Only the point in the board frame and the axis differ.
 
 Getting the conventions right is the whole job
 ----------------------------------------------
@@ -51,6 +61,9 @@ Usage
 
     # aim 3 mm to the left in the board frame, and actually send it
     python3 tools/press_board_centre.py --offset-mm -3,0,0 --publish
+
+    # press a button whose position was measured relative to the board
+    python3 tools/press_board_centre.py --button red --publish
 """
 
 import argparse
@@ -79,6 +92,30 @@ TCP_IN_FLANGE = np.array([0.0, 0.0, 0.1541])
 
 DEFAULT_HAND_EYE = os.path.join(os.path.dirname(os.path.dirname(
     os.path.abspath(__file__))), "T_flange_cam.json")
+
+
+def find_press_targets_dir():
+    """Locate `press_targets.py`.
+
+    This tool lives in the outer repo's `tools/`, the library lives in the
+    `piper_marker_perception` package -- so this needs a path, not an import.
+    Searching a couple of known layouts beats copying the parser here: the
+    `taught` gate and the axis normalisation are exactly the parts that must
+    not drift between the two entry points.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = os.path.dirname(here)
+    for candidate in (
+        os.path.join(root, "src/Piper_ros/src/piper_marker_perception/scripts"),
+        "/ws/src/Piper_ros/src/piper_marker_perception/scripts",
+        "/ws/install/piper_marker_perception/lib/piper_marker_perception",
+        os.path.join(root,
+                     "install/piper_marker_perception/lib/piper_marker_perception"),
+    ):
+        if os.path.isfile(os.path.join(candidate, "press_targets.py")):
+            return candidate
+    raise SystemExit(
+        "找不到 press_targets.py —— 包编译过了吗？（找过 tools/../src 和 /ws）")
 
 
 def quat_to_matrix(q):
@@ -187,7 +224,14 @@ def main():
                         help="板子位姿抖动超过这个值就拒绝发布（默认 %(default)s）")
     parser.add_argument("--offset-mm", default="0,0,0",
                         help="在**板系**里把瞄准点挪开，格式 dx,dy,dz 毫米。"
-                             "中心是 0,0,0；这个就是以后微调的旋钮")
+                             "中心是 0,0,0；这个就是以后微调的旋钮。"
+                             "--button 时作为额外的微调叠加上去")
+    parser.add_argument("--button", default="",
+                        help="按 config/board.yaml 里 targets.<name> 的位置，"
+                             "而不是板心。该条目必须已经是 taught: true")
+    parser.add_argument("--board-config", default="",
+                        help="board.yaml 路径（默认从 piper_marker_perception "
+                             "包的位置推出来）")
     parser.add_argument("--publish", action="store_true",
                         help="真的发到 /press/target_pose。不给就只算不发。")
     parser.add_argument("--repeats", type=int, default=3,
@@ -197,6 +241,43 @@ def main():
     offset = np.array([float(v) / 1000.0 for v in args.offset_mm.split(",")])
     if offset.shape != (3,):
         raise SystemExit("--offset-mm 要三个数，例如 -3,0,0")
+
+    # 默认 = 板心模式：目标点就是原点（加微调），按压轴就是板系 -Z。
+    tip_in_board = offset
+    press_axis = np.array([0.0, 0.0, -1.0])
+    button_label = "板心（板系原点）"
+    if args.button:
+        targets_dir = find_press_targets_dir()
+        sys.path.insert(0, targets_dir)
+        import press_targets  # noqa: E402  （路径上一步才拼出来）
+
+        config_path = args.board_config or os.path.normpath(
+            os.path.join(targets_dir, os.pardir, "config", "board.yaml"))
+        try:
+            targets = press_targets.PressTargetSet.from_yaml(config_path)
+        except press_targets.ConfigError as exc:
+            raise SystemExit(f"{config_path}: {exc}")
+        if args.button not in targets:
+            raise SystemExit(
+                f"{config_path} 里没有 targets.{args.button}"
+                f"（有的是：{', '.join(targets.names())}）")
+        chosen = targets[args.button]
+        # ⚠️ 这道闸门不能省。未教示的条目里是占位坐标（0,0,0 之类），
+        # 拿它去压 = 命令机械臂去一个没人知道的地方。
+        if not chosen.taught:
+            raise SystemExit(
+                f"targets.{args.button} 还是 taught: false —— 那是占位值，不是量出来的。"
+                f"\n量完把 {config_path} 里那个 taught 改成 true 再跑。"
+                f"\n教示工具：ros2 run piper_marker_perception teach_press_offset.py"
+                f" --name {args.button}")
+        # 单位是米。--offset-mm 是额外微调，照旧叠上去。
+        tip_in_board = np.asarray(chosen.tip_in_board, dtype=float) + offset
+        press_axis = np.asarray(chosen.press_axis_in_board, dtype=float)
+        button_label = (f"按键 {args.button}（板系 tip="
+                        f"({tip_in_board[0]*1000:+.1f}, {tip_in_board[1]*1000:+.1f}, "
+                        f"{tip_in_board[2]*1000:+.1f}) mm，轴="
+                        f"({press_axis[0]:+.3f}, {press_axis[1]:+.3f}, "
+                        f"{press_axis[2]:+.3f})）")
 
     hand_eye = np.array(json.load(open(args.hand_eye))["T_flange_cam_4x4"],
                         dtype=float)
@@ -231,23 +312,28 @@ def main():
         base_camera = flange @ hand_eye
         board_camera = quat_to_matrix(quat)
 
-        # 目标点在板系里是 offset，在相机系里 = 板位姿作用在 offset 上
-        point_camera = board_camera @ offset + board_centre
+        # 目标点在板系里是 tip_in_board，在相机系里 = 板位姿作用在它上面。
+        # 板心模式它的值就是 offset（原点 + 微调）；按键模式它来自 board.yaml，
+        # 是量出来的按键中心。
+        point_camera = board_camera @ tip_in_board + board_centre
         target = base_camera[:3, :3] @ point_camera + base_camera[:3, 3]
 
-        # 板系 -Z（+Z 是朝向观察者的外法线，按压要往里去）
-        direction = -(base_camera[:3, :3] @ board_camera[:, 2])
+        # 按压轴在板系里是 press_axis。板心模式恒为板系 -Z（+Z 是朝向观察者的
+        # 外法线，按压要往里去）；按键模式可以是斜的 —— 按键行程轴和面板法线
+        # 不一致时，斜着压会把它别住，所以那是个真输入，不是方便项。
+        direction = base_camera[:3, :3] @ (board_camera @ press_axis)
         direction /= np.linalg.norm(direction)
 
         tip = flange[:3, :3] @ TCP_IN_FLANGE + flange[:3, 3]
         print(f"瞄准点(base系)  = ({target[0]*1000:+7.1f}, {target[1]*1000:+7.1f}, "
               f"{target[2]*1000:+7.1f}) mm")
+        print(f"按压对象        = {button_label}")
         print(f"按压方向        = ({direction[0]:+.4f}, {direction[1]:+.4f}, "
               f"{direction[2]:+.4f})")
         print(f"当前杆尖        = ({tip[0]*1000:+7.1f}, {tip[1]*1000:+7.1f}, "
               f"{tip[2]*1000:+7.1f}) mm")
         print(f"需要移动        = {np.linalg.norm(target - tip)*1000:.1f} mm")
-        print(f"板系偏移        = ({offset[0]*1000:+.1f}, {offset[1]*1000:+.1f}, "
+        print(f"板系微调        = ({offset[0]*1000:+.1f}, {offset[1]*1000:+.1f}, "
               f"{offset[2]*1000:+.1f}) mm")
 
         if not (np.all(target >= np.array(WORKSPACE_MIN))
