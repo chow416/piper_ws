@@ -297,7 +297,11 @@ for i in $(seq 1 60); do
   # timeout of 3s —— 那句话写在任务日志里，看着像任务的问题，其实是规划器不在。
   # 只查订阅数/发布数是看不出这件事的，以前就是这么漏过去的。
   mg=$(dc "timeout 4 pgrep -c -f 'lib/moveit_ros_move_group/move_group'" 2>/dev/null)
-  if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ]; then
+  # ⚠️ 光看订阅者数**也不够**：实测出现过"订阅者是 1、但任务节点还没起全"，
+  # 于是就绪判定通过了，紧接着终端四却问不到它的参数（Node not found），
+  # 还被误报成"任务在干跑模式"。直接问一句最实在。
+  tq=$(dc "timeout 4 ros2 param get /piper_press_button_demo execute 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
+  if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ] && [ -n "$tq" ]; then
     echo "  ✓ 任务已待命，感知在发板子位姿，move_group 在跑（${i}s）"; break
   fi
   # move_group 起来又死了的话别白等 60 s —— 日志里有现成的尸检报告。
@@ -373,10 +377,26 @@ if [ "${mg:-0}" = "0" ]; then
   exit 1
 fi
 
-# 任务会不会真动 —— 直接问它，不靠人记住
-task_exec=$(dc "timeout 6 ros2 param get /piper_press_button_demo execute 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
-task_hw=$(dc "timeout 6 ros2 param get /piper_press_button_demo hardware_enable 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
+# 任务会不会真动 —— 直接问它，不靠人记住。
+#
+# ⚠️⚠️ 读空**不等于**"任务在干跑" —— 也可能只是节点还没起来（或根本没起来）。
+# 以前这两种情况都打成"任务自己是干跑模式"，而干跑模式下这个参数会读出
+# False、不是空。于是人跑去重起服务，问题却出在任务节点压根没起来。
+# 所以先重试几轮，实在读不到就直说是"问不到节点"。
+task_exec=""; task_hw=""
+for _ in 1 2 3 4 5; do
+  task_exec=$(dc "timeout 6 ros2 param get /piper_press_button_demo execute 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
+  task_hw=$(dc "timeout 6 ros2 param get /piper_press_button_demo hardware_enable 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
+  [ -n "$task_exec" ] && break
+  sleep 2
+done
 echo "════ 瞄准 ════"
+if [ -z "$task_exec" ]; then
+  echo "  ★ 问不到按压任务节点 /piper_press_button_demo —— 它没在跑，或还没起来。"
+  echo "    这不是干跑/实机的问题：干跑模式下 execute 会读出 False，而不是空。"
+  echo "    看看 /tmp/press.log 最后几行，或重起服务：tools/press_board.sh --serve --live"
+  exit 1
+fi
 echo "  按压任务现在： execute=$task_exec  hardware_enable=$task_hw"
 if [ "$LIVE" = "1" ] && [ "$task_exec" != "True" ]; then
   echo
@@ -406,7 +426,7 @@ fi
 
 if [ "$LIVE" != "1" ]; then
   echo
-  echo "════ 只算不发 ════ 什么都没动。加 --live 才发。"
+  echo "════ 只算不发（--dry）════ 什么都没动。不加 --dry 就是实机。"
   exit 0
 fi
 

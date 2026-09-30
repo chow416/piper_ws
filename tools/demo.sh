@@ -2,10 +2,13 @@
 #
 # 一键 demo —— 一个窗口跑完原来的「终端 3（服务）+ 终端 4（发目标）」。
 #
-#   tools/demo.sh                 干跑：起服务 + 瞄准一次，机械臂不动
-#   tools/demo.sh --live          实机：起服务 + 真按一次
-#   tools/demo.sh --live --button call   按 board.yaml 里量好的那个按键，而不是板心
+#   tools/demo.sh                 实机：起服务 + 真按一次（默认就是实机）
+#   tools/demo.sh --button call   按 board.yaml 里量好的那个按键，而不是板心
+#   tools/demo.sh --dry           干跑（算 IK 和轨迹，但不动臂）—— 不常用
 #   tools/demo.sh --offset-mm -3,0,0
+#
+# ⚠️ 默认**实机**。动真臂的两道闸门仍然在：服务必须用 --live 起，
+#    而本脚本默认就传它。想只看不动就用 --dry。
 #
 # ⚠️ 按压参数（接近段 standoff、按压行程、干跑/实机）**不在命令行上**，在：
 #
@@ -34,7 +37,7 @@
 
 set -uo pipefail
 
-LIVE=0
+LIVE=1
 OFFSET="0,0,0"
 SETTLE=6
 BUTTON_ARG=()
@@ -42,7 +45,9 @@ JITTER_ARG=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --live)      LIVE=1 ;;
+    --live)      LIVE=1    # 已经是默认，留着是为了不弄错人的习惯
+                 ;;
+    --dry)       LIVE=0 ;;
     --offset-mm) OFFSET="$2"; shift ;;
     --settle)    SETTLE="$2"; shift ;;
     --button)    BUTTON_ARG=(--button "$2"); shift ;;
@@ -147,7 +152,7 @@ echo "  （相机是独占的，所以感知在跑的时候 cam_view.py 打不�
 echo "  服务日志：$SERVE_LOG"
 if [ "$LIVE" != "1" ]; then
   echo
-  echo "  ⚠️ 现在是**干跑**（任务不动臂）。要真按：加 --live 重跑本脚本。"
+  echo "  ⚠️ 现在是**干跑**（--dry）。要真按：不加 --dry 直接重跑。"
 fi
 
 # ---------------------------------------------------------------- 第一轮
