@@ -33,7 +33,8 @@ BUTTON=""
 # 那种情况把小 marker 印大一点是治本，临时跑一次可以放宽这里。
 MAXJIT=2.0
 # 按压参数，单位**米**，和 launch 参数同名。默认值和 launch 默认值一致，
-# 不在这里偷偷不一样。安全 demo 用 --standoff 0.010 --depth 0.0015。
+# 不在这里偷偷不一样。⭐ 只要 config/press_params.yaml 在，下面这两个就
+# **完全不起作用** —— 想改按压行程请改那个文件。
 STANDOFF=0.005
 DEPTH=0.003
 VIEW=1            # --serve 时顺手把调试图转发到浏览器，--no-view 关掉
@@ -260,15 +261,34 @@ echo "════ 起服务 ════  execute=$EXEC hardware_enable=$ENABLE
 # 印出来就是骗人。踩过：横幅写着 standoff 5 mm，实际跑的是文件里的 25 mm，
 # 而人看着横幅去判断"现在压多深"。
 PRESS_PARAMS="$WS_ROOT/src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+# ⚠️ 只打印**从文件算出来**的值（米 → 毫米），不打印文件原文。
+#    原文带着手写的行尾注释，而注释会过期 —— 实测踩过两次：注释写 "# = 1.5 mm"
+#    而值是 0.015（其实是 15 mm），这条注释被原样打到屏幕上，看着像参数没生效。
+#    这里只认冒号后面那个数，注释怎么写都影响不到这一行。
+press_params_mm() {
+  awk -F'[:#]' '
+    BEGIN {
+      hint["contact_standoff_m"] = "接近段停在瞄准点之前这么远"
+      hint["press_depth"]        = "按压段从停下的地方再往前推这么多"
+      hint["approach_distance"]  = "从瞄准点往回退这么多开始接近"
+    }
+    /^[a-z_]+:/ {
+      name = $1; value = $2; gsub(/[ \t]/, "", value)
+      if (value + 0 <= 0) next
+      printf "    %-20s = %7.2f mm   %s\n", name, value * 1000, hint[name]
+    }
+  ' "$1"
+}
 if [ -f "$PRESS_PARAMS" ]; then
-  echo "  按压参数来自配置文件（★ 改它，下一次按压就生效）："
-  grep -E '^(contact_standoff_m|press_depth|approach_distance):' "$PRESS_PARAMS" \
-    | sed 's/^/    /'
+  echo "  按压参数（读自配置文件，已换算成毫米）："
+  press_params_mm "$PRESS_PARAMS"
   echo "    $PRESS_PARAMS"
+  echo "    ★ 改它，下一次按压就生效。"
 else
-  echo "  ⚠️ 配置文件不在（$PRESS_PARAMS）—— 退回 launch 参数："
-  echo "    contact_standoff_m=$STANDOFF   （接近段停在瞄准点之前这么远）"
-  echo "    press_depth=$DEPTH   （按压段越过瞄准点的行程）"
+  echo "  ⚠️ 配置文件不在（$PRESS_PARAMS）—— 退回 launch 参数，单位是**米**："
+  echo "    contact_standoff_m = $STANDOFF   接近段停在瞄准点之前这么远"
+  echo "    press_depth        = $DEPTH   按压段从停下的地方再往前推这么多"
+  echo "    （想改就建那个文件；只要它在，上面两个就不起作用）"
 fi
 echo "  常驻：来一条目标按一次。"
 dc_bg "ros2 run piper_marker_perception marker_locator.py --ros-args \

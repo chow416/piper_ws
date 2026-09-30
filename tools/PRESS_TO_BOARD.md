@@ -112,15 +112,20 @@ src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml
 ```
 
 **改完存盘即可。** 不用重起服务，不用重新编译 —— 节点每次按压前都重新读它。
-判据是日志里这一行变了：
+判据是**终端上那三个数**变了。`demo.sh` / `press_board.sh --serve` 的横幅会把配置
+文件里的值**算出来**印成毫米（它只读冒号后面那个数，行尾注释影响不到它），
+节点日志也会打一行：
 
 ```
-Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, contact standoff 25.0 mm, press depth 15.0 mm
+Press parameters (from .../press_params.yaml): approach <A> mm, contact standoff <B> mm, press depth <C> mm
 ```
 
-⚠️ 日志里的三个数一律是**毫米**，**不是**文件里的米。文件写 `0.015` ⇔ 日志说
-`15.0 mm`，是同一件事。反过来，**别拿文件里的注释去确认参数生效没有** ——
-注释写错了就是一条看着很真的假情报，而且它会被直接打到屏幕上。以日志为准。
+（上面是**格式**，数字随配置文件变。）
+
+⚠️ 横幅和日志印的都是**毫米**，不是文件里的米 —— 文件写 `0.015` ⇔ 终端说
+`15.0 mm`，是同一件事。
+⚠️ **别拿文件里的行尾注释去确认参数生效没有**：注释是手写的、会过期，
+而且它曾经被原样打到屏幕上，看着像参数没生效。现在终端不印注释了。
 
 "不用重新编译"也成立，因为 `install/` 里那份是**符号链接**指回源码
 （`colcon --symlink-install`），编辑源码里的文件就是编辑运行时那个。
@@ -134,10 +139,12 @@ Press parameters (from /ws/.../config/press_params.yaml): approach 30.0 mm, cont
 ### 📐 三个点是怎么定的
 
 ```
-接近起点 = 瞄准点 − approach_distance      (30 mm)
-按压起点 = 瞄准点 − contact_standoff       (25 mm)   ← 接近段停在这里
-按压终点 = 按压起点 + press_depth           (15 mm)   → 瞄准点前 10 mm
+接近起点 = 瞄准点 − approach_distance
+按压起点 = 瞄准点 − contact_standoff       ← 接近段停在这里
+按压终点 = 按压起点 + press_depth
 ```
+
+（具体多少毫米看**终端横幅**，它每次都是从配置文件现算的。写在文档里就会过期。）
 
 ⇒ **调 standoff 会把整个按压段一起平移**，而 `press_depth` 始终是
 "从停下的地方再压进去多少"，与标定误差无关。

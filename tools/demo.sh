@@ -71,6 +71,25 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PB="$HERE/press_board.sh"
 PARAMS_FILE="$(cd "$HERE/.." && pwd)/src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+
+# ⚠️ 只打印**从文件算出来**的值（米 → 毫米），不打印文件原文。
+#    原文带着手写的行尾注释，而注释会过期 —— 实测踩过两次：注释写 "# = 1.5 mm"
+#    而值是 0.015（其实是 15 mm），这条注释被原样打到屏幕上，看着像参数没生效。
+#    这里只认冒号后面那个数，注释怎么写都影响不到这一行。
+press_params_mm() {
+  awk -F'[:#]' '
+    BEGIN {
+      hint["contact_standoff_m"] = "接近段停在瞄准点之前这么远"
+      hint["press_depth"]        = "按压段从停下的地方再往前推这么多"
+      hint["approach_distance"]  = "从瞄准点往回退这么多开始接近"
+    }
+    /^[a-z_]+:/ {
+      name = $1; value = $2; gsub(/[ \t]/, "", value)
+      if (value + 0 <= 0) next
+      printf "  %-20s = %7.2f mm   %s\n", name, value * 1000, hint[name]
+    }
+  ' "$1"
+}
 SERVE_LOG=/tmp/demo_serve.log
 SERVE_PID=""
 
@@ -137,13 +156,13 @@ if [ "${#BUTTON_ARG[@]}" -gt 0 ]; then
 fi
 # 把配置文件里的值原样摆出来 —— 操作者要的就是"现在到底会怎么按"。
 if [ -f "$PARAMS_FILE" ]; then
-  echo "════ 按压参数（来自配置文件）════"
-  grep -E '^[a-z_]+:' "$PARAMS_FILE" | sed 's/^/  /'
+  echo "════ 按压参数（读自配置文件，已换算成毫米）════"
+  press_params_mm "$PARAMS_FILE"
   echo "  文件：$PARAMS_FILE"
   echo "  ★ 改这个文件，下一次按压就生效，不用重起。"
 else
   echo "  ⚠️ 配置文件不在：$PARAMS_FILE"
-  echo "     节点会退回 launch 参数（默认 standoff 5 mm / depth 4 mm）。"
+  echo "     节点会退回 launch 参数 —— 具体多少看上面 --serve 横幅印的。"
 fi
 
 echo
