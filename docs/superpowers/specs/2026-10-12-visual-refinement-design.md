@@ -28,18 +28,38 @@
 | 不变量 | 本设计如何保持 |
 |---|---|
 | 理想按压分**三段**：自由段 / 接近段 / 按压段 | 观测-修正**插在段与段之间**，不在任何段内部 |
-| 按压段用**接触检测**停止 | 完全不动按压段 |
-| **不得**用固定行程宣告按压成功 | 不变（`hardware_fixed_travel` 的现状不在本设计范围内） |
+| 按压段的停止条件 | **完全不动**（见下方说明） |
 | 执行层**不决定策略** | 观测-修正循环写在编排层（`press_runner`），执行层只被拆成两个纯执行函数 |
 | J1–J5 活动 / J6 固定 / TCP=`press_tcp` | 不动机器人模型 |
 | 硬件默认不执行 | 不变；本设计不新增任何默认开启运动的东西 |
+
+#### ⚠️ 关于「按压段怎么判定成功」—— 本硬件没有接触检测（事实陈述）
+
+**实机上只有一种手段：固定行程。** 这不是本设计的取舍，是硬件现实：
+
+- **没有任何接触传感器** —— `/press/contact` 在实机上**没有发布者**
+- `executePressSequence(..., require_contact)` 的两种取值，`press_executor.hpp:13-19`
+  已经写明：`true` = 仿真（虚拟接触）；`false` = **hardware without a contact sensor**
+- 实机路径传 `false`（`press_runner.cpp:154-161`），按压**在轨迹走完时结束**，
+  实测 TCP 行程只作**安全上限**，不是判据。同一段代码自己打着：
+  > `HARDWARE EXECUTION: no contact sensor. The press travel comes from the
+  > planned trajectory; the measured TCP travel is only a safety cap ... above it.`
+
+⇒ 契约里「按压段用接触检测停止 / 不得用固定行程宣告按压成功」这两条，**在现有硬件上
+做不到**。这是**先于本设计就存在的差距**，本设计：
+
+- ❌ 不引入接触检测
+- ❌ 不改变按压段的停止条件
+- ❌ **不把它当作待办** —— 不在本任务范围内
 
 ### 1.3 明确不做
 
 - ❌ 按**中间**连续闭环（IBVS / 视觉伺服整段）—— 任务书限定在"接近位姿"
 - ❌ 修正在按压段内的停止条件
+- ❌ **接触检测** —— **本硬件根本没有接触检测手段**，按压只能按固定行程判定（详见 §1.2）。
+      契约里那两条要求在实机上做不到，那是**先于本设计存在**的差距，**不在本任务范围内**
+- ❌ 动 press 段的速度 / 接触语义
 - ❌ 行为树（BT 是契约定下的独立目标，不和本设计捆绑）
-- ❌ 动 press 段的速度/接触语义
 
 ---
 
@@ -217,6 +237,10 @@ int executeFromPrePress(const rclcpp::Node::SharedPtr& node,
                         JointStateCache& joint_states,
                         bool require_contact);
 ```
+
+> **`require_contact` 是既有参数，原样透传。** 实机恒为 `false`（**硬件无接触传感器**，
+> 见 §1.2）。本设计**不新增任何接触语义**，只是把它跟着搬过去 ——
+> 签名保持一致，`press_executor.cpp` 里那条 `require_contact` 分支一行不动。
 
 **断点判据**从 `stage_name == "press button"` 改成
 `stage_name == "advance to button contact" || stage_name == "press button"` ——
