@@ -116,7 +116,80 @@ flowchart LR
 | **A（粗）** | `0` / `[0..8]` | `/press/target_pose`（**已存在**） | 自由段之前，远处 |
 | **B（精）** | `9` / `[9..17]` | **`/press/refine_pose`**（新增） | 到 `pre_press` 之后，按键旁 |
 
-**按 marker ID 分流检测**，两块板同框也不会被拼成一次 `solvePnP`。
+#### 同框不会混 —— 但保证来自哪里必须说清
+
+**对象点表本身就是白名单**，不是事后过滤（`aruco_board.py:346-352`）：
+
+```python
+by_id = spec.object_points_by_id()   # 只有 accepted_ids 里的 ID 才有对象点
+for marker_corners, marker_id in zip(corners, ids.flatten()):
+    if int(marker_id) not in by_id:
+        continue                      # not part of this board; ignore it
+```
+
+一个 marker 对 `solvePnP` 来说只是一堆像素点，**它的物理含义完全来自"查表查到的对象点"**——
+查不到 ⇒ 它就不是这块板的一部分。这是**查找表层面**的隔离，比事后过滤彻底。
+
+| 场景 | 结果 |
+|---|---|
+| 现在：B 板（ID 9–17）进入画面 | `accepted_ids: [0..8]` ⇒ 全部 `continue` 掉，**完全无感** |
+| 将来：两板 ID 不相交 | 各解各的，**不可能拼成一次 `solvePnP`** |
+
+#### ⚠️⚠️ 四条必须守住的东西
+
+**① 话题路由必须显式隔离（最大的坑，而且失败是静默的）**
+
+PnP 层的隔离是白送的；**"哪块板的结果发到哪个话题"必须显式写**。
+
+```python
+# ✅ 正确：两块板各解一次、各发各的
+coarse = detect(frame, ..., spec_a, min_markers=min_a)
+fine   = detect(frame, ..., spec_b, min_markers=min_b)
+if coarse: publish(coarse, "/press/target_pose")
+if fine:   publish(fine,   "/press/refine_pose")
+
+# ❌ 错误：谁先解出就发谁
+result = coarse or fine
+publish(result, "<某个话题>")
+```
+
+`pre_press` 那个位置**两块板可能同框**。写成后者 ⇒ 把 A 板的位置发到精修正话题上 ⇒
+**融合出一个错的修正量，而所有日志、RMS、marker 数全部正常**。
+
+**② `accepted_ids` 必须互斥，且要硬校验**
+
+上面的保证**完全建立在"ID 不重叠"上**。共用 ID（比如都从 0 开始）会让同一个码出现在两个
+`by_id` 里，两块板的 PnP 各自都会收下它 —— 保证**立刻失效**。
+
+⇒ 配置加载时做**硬检查**：两块板的 `accepted_ids` 交集非空 ⇒ **拒绝启动**。不能靠人记。
+
+**③ 每块板各存一份几何**
+
+`board.yaml` 现在 `marker_length` / `marker_separation` **全文件只有一份**，而它自己写着：
+
+> ⚠️ **不要填打印图上的设计值。** 图按 30.0 mm 出，A4 打出来实测是 28.5 mm。
+
+两块板共用一份几何 ⇒ 哪天只重印了其中一块、换了一台打印机，那块板的**所有距离会静默地
+按比例偏**。⇒ **两块板各存一份几何。**
+
+**④ `min_markers` 是主判据，RMS 不是**
+
+`aruco_board.py` 的文档记着实测结论：
+
+> 贴反时 9 个码只剩 **1 个**能解码，但**那 1 个足够让 `solvePnP` 拟合出一个朝前、指向正确、
+> 重投影 RMS 只有 0.14 px 的位姿** —— 而且是错的。
+
+**PnP 不会因为"只用了 1 个码"而报警。** 可信信号是 `detection.marker_ids` 的**长度**。
+
+3×3 板自动门槛 `(3×9+4)//5 = 6`：
+
+| | 要求 | 状态 |
+|---|---|---|
+| A 板（远处） | ≥ 6 个码 | ✅ 现有流程已过这关 |
+| **B 板（`pre_press`）** | **≥ 6 个码** | ⏳ spec §7 第 3 项，尚未实测 |
+
+> 守住这四条，剩下的失败就全是**可见的**（日志打
+> `not publishing: no board (need 6 markers)`），不会有静默的错。
 
 打印图已经生成（设计值 marker 30 mm / 间隙 10 mm，板宽 110 mm）：
 
@@ -338,7 +411,9 @@ $$x_{button} - d_{approach} \;\ge\; 0.18\ \text{m}$$
 
 | 级别 | 判据 |
 |---|---|
-| **单元/离线** | 融合函数：夹角 0° / 小角度 / 超限 / 反向 四种输入的正确输出；降级路径 |
+| **单元/离线（融合）** | 夹角 0° / 小角度 / 超限 / 反向 四种输入的正确输出；降级路径 |
+| **单元/离线（配置校验）** | 两块板 `accepted_ids` 有交集 ⇒ **拒绝启动**并指明是哪两个 ID；无交集 ⇒ 正常 |
+| **单元/离线（同框不串）** | 合成一张**两块板同框**的图 ⇒ `/press/target_pose` 收到 **A 板**的位姿、`/press/refine_pose` 收到 **B 板**的位姿，**两者都不串**（可扩展现有的 `selftest_offline.py` 合成图基础设施） |
 | **干跑**（Gazebo `execute:=false`） | 日志出现 `Refine round 1/1: ...`（或 fallback WARN）；六个阶段全部规划成功；修正后 `advance to button contact` 的时长合理 |
 | **降级** | 不发 `/press/refine_pose` 时出现 fallback WARN，按压照常完成 |
 | **仿真执行** | Gazebo 里六个阶段跑完，`SUCCESS` |
@@ -385,7 +460,9 @@ $$x_{button} - d_{approach} \;\ge\; 0.18\ \text{m}$$
 
 1. `press_parameters`：放开 `approach_distance` 上限、**新增组合校验**
    （`x_button − d_approach ≥ 0.18`，见 §3.8）、新增 §3.7 的参数
-2. 感知侧：`board.yaml` 双板配置 + `marker_locator` 按 ID 分流发两个话题
+2. 感知侧：`board.yaml` 拆成**两块板各自一份几何 + 互斥 ID**（加载时硬校验）
+   + `marker_locator` **每块板各解一次、各发各的话题** ——
+   禁止“谁先解出就发谁”（见 §3.2 四条）
 3. `createTask` 加 `use_prerecorded_route` 开关
 4. 拆 `executePressSequence` → `runToPrePress` / `executeFromPrePress`
 5. 编排层：`runSinglePress` 里的有界修正循环 + 融合 + 降级
