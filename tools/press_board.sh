@@ -154,14 +154,22 @@ cleanup() {
   #   同理 `[m]ove_group` 会命中链接命令里的 libmoveit_ros_move_group.so。
   #   锚到 install 下的可执行文件路径就不会误伤：编译命令行里不会出现
   #   lib/<pkg>/<exe> 这种写法。
-  dc "pkill -f '[p]ress_button_hardware.launch.py'; \
-      pkill -f 'lib/piper_elevator_manipulation/press_button_demo'; \
-      pkill -f 'lib/piper_marker_perception/marker_locator'; \
-      pkill -f 'lib/piper_marker_perception/press_target_bridge'; \
-      pkill -f 'run piper_marker_perception press_target_bridge'; \
-      pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
-  sleep 2
-  dc "pkill -f 'lib/moveit_ros_move_group/move_group'" >/dev/null 2>&1
+  # ⚠️ 先看有没有东西可清，**没有就别睡那 2 s**。那 2 s 不是随便写的：任务节点
+  #    要先松手，move_group 才退得干净。但一键脚本每次启动都要走两遍清场
+  #    （demo.sh 开头一次、收尾一次），而现场绝大多数时候本来就是空的。
+  #    探针用和上面「残留」一样的花样；就算它偏保守（多报了一个），代价也只是
+  #    回到原来的行为 —— 绝不会少杀一个进程。
+  doomed=$(dc "pgrep -c -f 'lib/moveit_ros_move_group/move_group|lib/piper_elevator_manipulation/press_button_demo|lib/piper_marker_perception/marker_locator|lib/piper_marker_perception/press_target_bridge'" 2>/dev/null)
+  if [ "${doomed:-0}" != "0" ]; then
+    dc "pkill -f '[p]ress_button_hardware.launch.py'; \
+        pkill -f 'lib/piper_elevator_manipulation/press_button_demo'; \
+        pkill -f 'lib/piper_marker_perception/marker_locator'; \
+        pkill -f 'lib/piper_marker_perception/press_target_bridge'; \
+        pkill -f 'run piper_marker_perception press_target_bridge'; \
+        pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
+    sleep 2
+    dc "pkill -f 'lib/moveit_ros_move_group/move_group'" >/dev/null 2>&1
+  fi
   # ⚠️ 残留的 --serve **外壳**也要收：它不是容器里那些节点，上面几个 pkill 都看不见
   # 它，而它拿着服务锁。不收的话下一轮 --serve 会被自己的锁挡在门外，报
   # 「已经有 --serve 在跑」，可现场其实早就空了 —— 看着像 bug，其实是残壳。
@@ -334,8 +342,20 @@ dc_bg "ros2 run piper_marker_perception press_target_bridge.py --ros-args \
 
 dc_bg "ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
   target_source:=topic max_presses:=0 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
-  contact_standoff_m:=$STANDOFF press_depth:=$DEPTH \
+  contact_standoff_m:=$STANDOFF press_depth:=$DEPTH scene_wait_s:=2.0 \
   > /tmp/press.log 2>&1"
+# ⚠️ scene_wait_s 压到 2 s 是一条实测结论，不是随手调的。
+#
+#   任务节点**不需要**在启动时就有 move_group：它只在**规划那一刻**才去问
+#   get_planning_scene（MTC 的 CurrentState 阶段，见
+#   third_party/moveit_task_constructor/core/src/stages/current_state.cpp）。
+#   本流程里规划发生在"发目标之后"，而发目标本身还要先过感知、再收 6 s 的
+#   稳定帧 —— 等真去问的时候 move_group 早就起来了。
+#
+#   launch 里的默认 10 s 是给**一次性部署**留的（max_presses=1、目标从参数来，
+#   节点一起来就按），在这里是纯白等：实测 launch.log 里
+#   "move_group process started" 和 "press_button_demo process started"
+#   两条时间戳正好差 10.08 s。2 s 只是让任务节点排在 move_group 后面，别抢它的启动。
 
 # 调试图转发 —— 不占相机设备，所以能和 marker_locator 同时开。
 if [ "$VIEW" = "1" ]; then
@@ -343,24 +363,27 @@ if [ "$VIEW" = "1" ]; then
 fi
 
 echo "  等节点起来（最多 60 s）..."
-for i in $(seq 1 60); do
-  # ⚠️ 这里用 sed 不用 awk：命令要穿过 dc 的三层展开，写 awk '{print $3}' 的话
-  # 调用处转义成 \$3，到了接收端 shell **又会被展开一次**（无位置参数 → 空），
-  # awk 实际收到的是 `print `（打印整行），比较 = "1" 就永远不成立 ——
-  # 表现为“服务明明起来了但一直说没就绪”。sed 不需要 $，没有这个问题。
-  subs=$(dc "timeout 4 ros2 topic info /press/target_pose 2>/dev/null | sed -n 's/^Subscription count: *//p'" 2>/dev/null)
-  board=$(dc "timeout 4 ros2 topic info /perception/board_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
-  # move_group 必须**活着**：任务在 'capture live start state' 那一段要问它拿
-  # PlanningScene，拿不到就报 Failed to acquire current PlanningScene within
-  # timeout of 3s —— 那句话写在任务日志里，看着像任务的问题，其实是规划器不在。
-  # 只查订阅数/发布数是看不出这件事的，以前就是这么漏过去的。
-  mg=$(dc "timeout 4 pgrep -c -f 'lib/moveit_ros_move_group/move_group'" 2>/dev/null)
-  # ⚠️ 光看订阅者数**也不够**：实测出现过"订阅者是 1、但任务节点还没起全"，
-  # 于是就绪判定通过了，紧接着终端四却问不到它的参数（Node not found），
-  # 还被误报成"任务在干跑模式"。直接问一句最实在。
-  tq=$(dc "timeout 4 ros2 param get /piper_press_button_demo execute 2>/dev/null | sed -n 's/.*[[:space:]]//p'" 2>/dev/null)
-  if [ "${subs:-0}" = "1" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ] && [ -n "$tq" ]; then
-    echo "  ✓ 任务已待命，感知在发板子位姿，move_group 在跑（${i}s）"; break
+# ⚠️ 判据换成**日志两行 + 一次 pgrep**，一轮一次 dc。
+#
+# 原来一轮要 4 次 ROS CLI（`ros2 topic info` ×2、`ros2 param get`，中间还有
+# `pgrep`），再加 sleep 1。实测每穿一次 dc 就要 0.45~0.62 s，而 ros2 命令自己还要
+# 起一个 Python 进程 —— 于是「等节点起来」有大半时间是在等**探针自己**，
+# 而不是在等节点。
+#
+# ⚠️ 这不是放松判定：拿去的两行日志都比被替掉的信号**更晚**出现。
+#    /tmp/press.log 的 "indefinitely" 是节点把所有参数读完、两个 TargetSource 建好
+#    之后才打的那句等待 —— 比「订阅数=1」晚，也正是当初加 `ros2 param get`
+#    想抓的那个时刻（注释里那次「订阅数=1 但节点没起全」）。
+#    /tmp/ml.log 的 "/dev/video2" 在相机打开之后才打，比「发布者数 != 0」晚。
+#    两个日志在起服务时都被 `>` **截断**重定向过，不会命中上一轮的旧行。
+#    「订阅者正好 1 个」不在这儿查：那是**发目标之前**的事，终端 4 那段每次都查，
+#    放在这里只是一次重复的开销。
+for i in $(seq 1 120); do
+  mg=0 task=0 board=0
+  probe=$(dc "echo \$(pgrep -c -f lib/moveit_ros_move_group/move_group) \$(grep -c indefinitely /tmp/press.log 2>/dev/null) \$(grep -c /dev/video2 /tmp/ml.log 2>/dev/null)" 2>/dev/null)
+  read -r mg task board <<<"${probe:-0 0 0}"
+  if [ "${task:-0}" != "0" ] && [ "${board:-0}" != "0" ] && [ "${mg:-0}" != "0" ]; then
+    echo "  ✓ 任务已待命，感知在跑，move_group 在跑（约 $((i / 2)) s）"; break
   fi
   # move_group 起来又死了的话别白等 60 s —— 日志里有现成的尸检报告。
   if [ "${mg:-0}" = "0" ] && dc "grep -qE 'Segmentation fault|process has died' /tmp/press.log" 2>/dev/null; then
@@ -370,9 +393,9 @@ for i in $(seq 1 60); do
     echo "     最常见原因：另一个 press_board.sh 实例退出时按名字 pkill 误杀。"
     exit 1
   fi
-  sleep 1
-  if [ "$i" = "60" ]; then
-    echo "  ✗ 等了 60 s 还没就绪（任务订阅者=${subs:-0}，板子发布者=${board:-0}，move_group 进程=${mg:-0}）。看看："
+  sleep 0.5
+  if [ "$i" = "120" ]; then
+    echo "  ✗ 等了 60 s 还没就绪（任务=${task:-0} 感知=${board:-0} move_group=${mg:-0}）。看看："
     dc "grep -viE 'corrupt|Select' /tmp/press.log | tail -5" 2>/dev/null
     dc "grep -viE 'corrupt|Select' /tmp/ml.log | tail -5" 2>/dev/null
     exit 1
