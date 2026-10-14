@@ -130,20 +130,53 @@ flowchart LR
 
 ### 3.2 感知侧：一个节点、两块板、两个话题
 
-**⚠️ 实际的感知链路是【两个节点】，不是本节早先写的一个** —— 2026-10-14 核代码纠正：
+**⚠️⚠️ 实际的链路 —— 2026-10-14 两次纠正后定稿**
 
 ```
-marker_locator  ──[板子位姿]──▶  press_target_bridge  ──[按键位姿]──▶  press_button_demo
-                 board_topic                      target_topic
-                 (默认 /perception/board_pose)    (默认 /press/target_pose)
+marker_locator.py            发 /perception/board_pose（板子位姿，相机光学系）
+     │                       ↑ 由 `press_board.sh --serve` 起，常驻
+     ▼
+tools/press_board_centre.py  读 board.yaml 的 targets.<name>，施加 tip_in_board
+     │                       发 /press/target_pose
+     │                       ↑ 由 `press_board.sh`（非 --serve）**每按一次跑一次**，一次性 CLI
+     ▼
+press_button_demo            订 /press/target_pose
 ```
 
-⇒ **双板改动两个节点都要动**：前者“每块板各解一次”，后者“每块板各施一次 `tip_in_board`”。
+> 🔴 **`press_target_bridge.py` 是另一份实现，当前流程里【没人起它】。**
+> 它是个 ROS 节点（订板子位姿、发按键目标），文档和 `CMakeLists.txt` 里都有，
+> 但 `press_board.sh` 从不启动它 —— 施加 `tip_in_board` 的**实际是那条 CLI**
+> （`press_board.sh:464`）。
+>
+> **教训（这次自己踩的）**：拓扑要从**启动脚本**里读，**不能从源码树里有哪个文件推断**。
+> 我第一次纠正时读了 `press_target_bridge.py` 的代码就下了结论 —— 也错了。
 
-| 通道 | 形态 | `accepted_ids` | 板子位姿话题 | 按键目标话题 |
-|---|---|---|---|---|
-| **粗（A）** | **3×3 整板** | `[0..8]` | `board_topic`（**已存在**） | `/press/target_pose`（**已存在**） |
-| **精（B）** | **单个 marker** | `[9]` | **新增一个同名参数** | **`/press/refine_pose`**（新增） |
+#### ⚠️ 这个事实对双板设计有一个硬约束
+
+| | A 通道（粗） | B 通道（精） |
+|---|---|---|
+| 什么时候出目标 | 按压**之前**，一次 | **`pre_press` 停下之后**，按压中途 |
+| 一次性 CLI 够用吗 | ✅ 够（现状就是这样） | ❌ **不够** —— 它发完就退出了 |
+| 需要什么 | — | **一个常驻节点**，在那一刻能再测一次 |
+
+**⇒ B 通道必须走节点，而 `press_target_bridge.py` 正是这个形状**（它一直没被用上）。
+
+| 通道 | 形态 | `accepted_ids` | 板子位姿话题 | 按键目标话题 | 谁发 |
+|---|---|---|---|---|---|
+| **粗（A）** | 3×3 整板 | `[0..8]` | `/perception/board_pose`（已有） | `/press/target_pose`（已有） | `press_board_centre.py`（**不变**） |
+| **精（B）** | 单个 marker | `[9]` | **新增一个** | **`/press/refine_pose`**（新增） | **`press_target_bridge.py` 常驻** |
+
+#### ★★ 硬约束：**启动流程一个字都不变**（2026-10-14 用户明确要求）
+
+用户给了现有的操作流程并要求保持原样：**终端 0**（自检 + can0）→ **终端 1**
+（`piper_real_bringup` 使能，常驻）→ **终端 2**（`go_home.py`）→ `tools/demo.sh --button call --live`。
+
+⇒ **终端数量不变、敲的命令不变、交互不变。** 双板支持只能是
+`press_board.sh --serve` **内部**多起一个节点，对使用者完全透明。
+
+⇒ 任何"再开一个终端跑 XXX"的方案都不合格。
+
+> 这条约束也说明为什么**不能用"两个独立节点 + 人工分别启动"**那类方案。
 
 > **2026-10-14 决定：B 用单个 marker，不用 3×3。**
 > 收益见 §3.8（把"接近位姿要外移"整块要求解掉了），代价见下方。
@@ -583,12 +616,15 @@ $$x_{button} - d_{approach} \;\ge\; 0.18\ \text{m}$$
    ~~放开 `approach_distance` 上限~~ —— **不需要了**（§3.8）。
    组合校验（`x_button − d_approach ≥ 0.18`）**可选**，但值得做：
    防的是“臂都动了才发现 IK 失敗”
-2. 感知侧（**两个节点都要改**，见 §3.2 的拓扑纠正）：
+2. 感知侧（见 §3.2 定稿的拓扑与**启动流程不变**那条硬约束）：
    - `board.yaml` 拆成**两块板各自一份几何 + 互斥 ID**（加载时硬校验），
      **B 板填成单码形态**（`markers_x/y: 1`、`marker_separation: 0.0`、`accepted_ids: [9]`）
-   - `marker_locator` **每块板各跑一次 `detect()`、各发一个板子位姿话题**；
-     `press_target_bridge` **两个板子位姿话题各订一个、各发一个按键目标话题** ——
-     禁止“谁先解出就发谁”（见 §3.2 四条）
+   - `marker_locator` **每块板各跑一次 `detect()`、各发一个板子位姿话题**
+   - **B 通道**：让常驻的 `press_target_bridge.py` 订 B 的板子位姿话题、发 `/press/refine_pose`
+     （它现在没被起过，需要先确认它本身是好的 —— 有 `selftest_bridge.py` / `test_bridge_live.py`）
+   - **A 通道不动**：`press_board_centre.py` 继续每按一次一次性发 `/press/target_pose`
+   - `press_board.sh --serve` **内部**多起一个 bridge 节点 —— 终端/命令/交互都不变
+   - 禁止"谁先解出就发谁"（见 §3.2 四条）
 3. `createTask` 加 `use_prerecorded_route` 开关
 4. 拆 `executePressSequence` → `runToPrePress` / `executeFromPrePress`
 5. 编排层：`runSinglePress` 里的有界修正循环 + **只融合位置** + 降级
