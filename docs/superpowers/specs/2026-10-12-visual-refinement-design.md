@@ -130,12 +130,20 @@ flowchart LR
 
 ### 3.2 感知侧：一个节点、两块板、两个话题
 
-`marker_locator` 从"一份板配置"扩展成"一份配置里两块板"：
+**⚠️ 实际的感知链路是【两个节点】，不是本节早先写的一个** —— 2026-10-14 核代码纠正：
 
-| 板 | 形态 | `first_marker_id` / `accepted_ids` | 话题 | 可见时机 |
+```
+marker_locator  ──[板子位姿]──▶  press_target_bridge  ──[按键位姿]──▶  press_button_demo
+                 board_topic                      target_topic
+                 (默认 /perception/board_pose)    (默认 /press/target_pose)
+```
+
+⇒ **双板改动两个节点都要动**：前者“每块板各解一次”，后者“每块板各施一次 `tip_in_board`”。
+
+| 通道 | 形态 | `accepted_ids` | 板子位姿话题 | 按键目标话题 |
 |---|---|---|---|---|
-| **A（粗）** | **3×3 整板** | `0` / `[0..8]` | `/press/target_pose`（**已存在**） | 自由段之前，远处 |
-| **B（精）** | **单个 marker** | `9` / `[9]` | **`/press/refine_pose`**（新增） | 到 `pre_press` 之后，按键旁 |
+| **粗（A）** | **3×3 整板** | `[0..8]` | `board_topic`（**已存在**） | `/press/target_pose`（**已存在**） |
+| **精（B）** | **单个 marker** | `[9]` | **新增一个同名参数** | **`/press/refine_pose`**（新增） |
 
 > **2026-10-14 决定：B 用单个 marker，不用 3×3。**
 > 收益见 §3.8（把"接近位姿要外移"整块要求解掉了），代价见下方。
@@ -575,10 +583,11 @@ $$x_{button} - d_{approach} \;\ge\; 0.18\ \text{m}$$
    ~~放开 `approach_distance` 上限~~ —— **不需要了**（§3.8）。
    组合校验（`x_button − d_approach ≥ 0.18`）**可选**，但值得做：
    防的是“臂都动了才发现 IK 失敗”
-2. 感知侧：
+2. 感知侧（**两个节点都要改**，见 §3.2 的拓扑纠正）：
    - `board.yaml` 拆成**两块板各自一份几何 + 互斥 ID**（加载时硬校验），
      **B 板填成单码形态**（`markers_x/y: 1`、`marker_separation: 0.0`、`accepted_ids: [9]`）
-   - `marker_locator` **每块板各解一次、各发各的话题** ——
+   - `marker_locator` **每块板各跑一次 `detect()`、各发一个板子位姿话题**；
+     `press_target_bridge` **两个板子位姿话题各订一个、各发一个按键目标话题** ——
      禁止“谁先解出就发谁”（见 §3.2 四条）
 3. `createTask` 加 `use_prerecorded_route` 开关
 4. 拆 `executePressSequence` → `runToPrePress` / `executeFromPrePress`
