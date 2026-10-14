@@ -71,6 +71,37 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PB="$HERE/press_board.sh"
 PARAMS_FILE="$(cd "$HERE/.." && pwd)/src/Piper_ros/src/piper_elevator_manipulation/config/press_params.yaml"
+WS_ROOT="$(cd "$HERE/.." && pwd)"
+
+# ── 只允许一份实例 ────────────────────────────────────────────────────
+# ⚠️ 这一段防的是**自伤**。
+#
+# 真事故（实测现场：/tmp/demo_serve.log + /tmp/press.log）：两份 demo.sh 同时在。
+# 后起的那份**开头**就调 press_board.sh --down，而 --down 是 FORCE —— 它绕过
+# 服务归属令牌、按名字杀进程，于是把先起那份的 move_group 一并带走。先起那份的
+# 常驻循环要 5~8 s 才摸到脉（见 press_board.sh 里那个 sleep 5 + sleep 3），
+# 它退出、清场，而那时后起那份的 move_group 刚好在启动：
+#
+#   [move_group-1] process started with pid [107482]
+#   [move_group-1] signal_handler(SIGINT/SIGTERM)     ← 起来 0.16 s
+#   terminate called after throwing 'RCLError'
+#   what(): Couldn't initialize rcl timer handle: the given context is not valid
+#
+# 人看到的就是“运行不起来”，而现场其实早就空了。
+#
+# 上一位通常是刚按完 q / Ctrl-C 的**自己**，收尾要几秒，所以先等一会儿再下结论。
+# 锁由本脚本持有，并随 fd 传给子进程 press_board.sh --serve（它看到
+# PRESS_SERVE_LOCK=held 就不再自己抢一次 —— 同一个打开文件描述上 flock 会
+# 自己跟自己冲突，把整份服务挡在门外）。
+exec 9>"$WS_ROOT/.press_serve.lock"
+if ! flock -w 10 9; then
+  echo "★ 已经有一份 demo.sh / --serve 在跑，不再叠一份。"
+  echo "   两份会互相清场：后起的那份会把先起那份的 move_group 杀掉，"
+  echo "   然后自己也起不来（move_group 起来 0.16 s 就被 SIGINT）。"
+  echo "   到那个窗口按 q 退出，或先跑：tools/press_board.sh --down"
+  exit 1
+fi
+export PRESS_SERVE_LOCK=held
 
 # ⚠️ 只打印**从文件算出来**的值（米 → 毫米），不打印文件原文。
 #    原文带着手写的行尾注释，而注释会过期 —— 实测踩过两次：注释写 "# = 1.5 mm"

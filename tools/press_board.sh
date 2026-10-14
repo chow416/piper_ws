@@ -157,6 +157,8 @@ cleanup() {
   dc "pkill -f '[p]ress_button_hardware.launch.py'; \
       pkill -f 'lib/piper_elevator_manipulation/press_button_demo'; \
       pkill -f 'lib/piper_marker_perception/marker_locator'; \
+      pkill -f 'lib/piper_marker_perception/press_target_bridge'; \
+      pkill -f 'run piper_marker_perception press_target_bridge'; \
       pkill -f '[t]ools/debug_view.py'" >/dev/null 2>&1
   sleep 2
   dc "pkill -f 'lib/moveit_ros_move_group/move_group'" >/dev/null 2>&1
@@ -172,7 +174,7 @@ cleanup() {
   # （flock 认 inode，删掉即换新 inode）。令牌才是防误杀的那道，见上面的说明。
   rm -f "$SERVE_LOCK_FILE"
   echo
-  echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / debug_view / move_group"
+  echo "—— 已清理：press_button_hardware / press_button_demo / marker_locator / press_target_bridge / debug_view / move_group"
   # 以前这里无条件写「bringup 仍在跑」。bringup 不在的时候那是句假话，
   # 而这句话是操作者判断「臂还使能着吗」的依据，说错比不说更糟。
   if dc "pgrep -f '[r]os2_control_node'" >/dev/null 2>&1; then
@@ -220,7 +222,7 @@ else
   echo "  相机    空闲"
 fi
 
-left=$(dc "pgrep -a -f 'lib/moveit_ros_move_group/move_group|lib/piper_elevator_manipulation/press_button_demo|lib/piper_marker_perception/marker_locator'" 2>/dev/null)
+left=$(dc "pgrep -a -f 'lib/moveit_ros_move_group/move_group|lib/piper_elevator_manipulation/press_button_demo|lib/piper_marker_perception/marker_locator|lib/piper_marker_perception/press_target_bridge'" 2>/dev/null)
 if [ -n "$left" ]; then
   echo "  残留    ✗ 上一轮没清干净（$(printf '%s\n' "$left" | wc -l) 个）："; echo "$left" | sed 's/^/            /'
   echo "            —— 跑 tools/press_board.sh --down 清掉"; bad=1
@@ -255,13 +257,19 @@ if [ "$SERVE" = "1" ]; then
 # 同样含 'press_board.sh --serve'，只排除 $$ 会把自己判成「别人」——
 # 实测就这么误报过一次，把自己挡在门外。flock 认的是文件锁，不认命令行：
 # 进程一死锁自动放；宿主实例和容器实例共用同一个 inode，两边也能互斥。
-exec 9>"$SERVE_LOCK_FILE"
-if ! flock -n 9; then
-  echo "★ 已经有 --serve 在跑（锁 $SERVE_LOCK_FILE 被占），不再叠一份。"
-  echo "   用那个终端就好；真要推倒重来：tools/press_board.sh --down"
-  exit 1
+#
+# ⚠️ 调用方（tools/demo.sh）可能**已经**拿着这把锁了：它把锁的 fd 传了下来，同时
+#    把 PRESS_SERVE_LOCK=held 放进环境。这时再开一次就是同一个文件上的第二次
+#    打开 —— flock 认的是打开文件描述、不是进程，于是它会把**自己人**挡在门外，
+#    表现是「已经有 --serve 在跑」，而现场其实一份都没有。
+if [ "${PRESS_SERVE_LOCK:-}" != "held" ]; then
+  exec 9>"$SERVE_LOCK_FILE"
+  if ! flock -n 9; then
+    echo "★ 已经有 --serve 在跑（锁 $SERVE_LOCK_FILE 被占），不再叠一份。"
+    echo "   用那个终端就好；真要推倒重来：tools/press_board.sh --down"
+    exit 1
+  fi
 fi
-
 trap cleanup EXIT INT TERM
 echo "$SERVE_TOKEN" > "$SERVE_OWNER_FILE"
 
@@ -306,6 +314,24 @@ echo "  常驻：来一条目标按一次。"
 dc_bg "ros2 run piper_marker_perception marker_locator.py --ros-args \
   --params-file /ws/install/piper_marker_perception/share/piper_marker_perception/config/marker_locator_orbbec.yaml \
   > /tmp/ml.log 2>&1"
+
+# 精修正通道（接近位姿的第二次观测）—— 订那个单码的板子位姿，发 /press/refine_pose。
+# ⚠️ 它**只在接近位姿那一刻**起作用，所以必须常驻：一次性 CLI 发完就退出了，
+#    那一刻它早就不在了。
+# ⚠️ 和上面那条（粗目标）是**两个独立实例**，各订各的话题、各发各的话题。
+#    代码里没有让它们合流的路径，故意的：把粗板位姿发到精修正话题上会融合出
+#    一个错的修正量，而日志 / RMS / marker 数**全部正常**。
+# ⚠️ 精修正盯的是**某一个**固定的码，所以它属于哪个按键是贴码时就定死的，
+#    没法像粗目标那样每次按压现选。`--button` 可以覆盖；默认是部署里唯一的按键。
+#    名字对不上时 bridge 会**大声报错**（unknown target '...'; config has [...]），
+#    不会静默失效。
+REFINE_TARGET="${BUTTON:-call}"
+dc_bg "ros2 run piper_marker_perception press_target_bridge.py --ros-args \
+  -p target:=$REFINE_TARGET -p offset:=refine \
+  -p board_topic:=/perception/refine_board_pose -p topic:=/press/refine_pose \
+  -p frame:=base_link \
+  > /tmp/refine.log 2>&1"
+
 dc_bg "ros2 launch piper_elevator_manipulation press_button_hardware.launch.py \
   target_source:=topic max_presses:=0 execute:=$EXEC hardware_enable:=$ENABLE rviz:=false \
   contact_standoff_m:=$STANDOFF press_depth:=$DEPTH \
@@ -352,6 +378,18 @@ for i in $(seq 1 60); do
     exit 1
   fi
 done
+
+# 精修正通道**只报告、不拦人**：它是增益项，不在也该能按 —— 任务侧会走降级
+# 路径用粗目标，那正是设计要的。所以这里没有一个"没就绪就退出"。
+# 板子没贴、偏移没量、话题名改了，全都表现为下面这个 0。
+refine_pub=$(dc "timeout 4 ros2 topic info /press/refine_pose 2>/dev/null | sed -n 's/^Publisher count: *//p'" 2>/dev/null)
+refine_name=$(dc "timeout 4 ros2 node list 2>/dev/null | grep -c press_target_bridge" 2>/dev/null)
+echo "  精修正通道：/press/refine_pose 发布者=${refine_pub:-0}，bridge 节点=${refine_name:-0}"
+if [ "${refine_pub:-0}" = "0" ]; then
+  echo "    ⚠️ 桥在跑，但没人发精目标 —— 按压时会**退回用粗目标**（功能静默失效）。"
+  echo "       看 /tmp/refine.log。最常见：board.yaml 里 refine_taught 是 false，"
+  echo "       或者 refine_board 那段没填。"
+fi
 
   echo
   echo "════ 服务常驻中 ════"
