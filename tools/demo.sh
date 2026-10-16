@@ -4,7 +4,7 @@
 #
 #   tools/demo.sh                 实机：起服务 + 真按一次（默认就是实机）
 #   tools/demo.sh --button call   按 board.yaml 里量好的那个按键，而不是板心
-#   tools/demo.sh --dry           干跑（算 IK 和轨迹，但不动臂）—— 不常用
+#   tools/demo.sh --dry           干跑（发布给 execute=false 任务，算 IK 和轨迹但不动臂）
 #   tools/demo.sh --offset-mm -3,0,0
 #
 # ⚠️ 默认**实机**。动真臂的两道闸门仍然在：服务必须用 --live 起，
@@ -116,6 +116,7 @@ press_params_mm() {
     }
     /^[a-z_]+:/ {
       name = $1; value = $2; gsub(/[ \t]/, "", value)
+      if (!(name in hint)) next
       if (value + 0 <= 0) next
       printf "  %-20s = %7.2f mm   %s\n", name, value * 1000, hint[name]
     }
@@ -140,7 +141,7 @@ teardown() {
 trap teardown EXIT INT TERM
 
 press_once() {
-  local flag=""
+  local flag="--plan"
   [ "$LIVE" = "1" ] && flag="--live"
   # shellcheck disable=SC2086
   "$PB" $flag --settle "$SETTLE" --offset-mm "$OFFSET" "${BUTTON_ARG[@]}" "${JITTER_ARG[@]}"
@@ -209,11 +210,16 @@ fi
 echo
 press_once
 first_rc=$?
+if [ "$first_rc" != "0" ]; then
+  echo
+  echo "════ 本轮失败 ════ 目标未完成规划/执行，退出并清理。"
+  exit "$first_rc"
+fi
 
 # ---------------------------------------------------------------- 交互循环
 if [ "$LIVE" != "1" ]; then
   echo
-  echo "════ 只算不发 ════ 什么都没动。"
+  echo "════ 干规划完成 ════ IK/MTC 已运行，没有控制轨迹发送。"
 fi
 
 while true; do

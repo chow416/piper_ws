@@ -118,6 +118,15 @@ def find_press_targets_dir():
         "找不到 press_targets.py —— 包编译过了吗？（找过 tools/../src 和 /ws）")
 
 
+def load_press_targets_module():
+    """Load the shared target/orientation helpers from marker perception."""
+    targets_dir = find_press_targets_dir()
+    if targets_dir not in sys.path:
+        sys.path.insert(0, targets_dir)
+    import press_targets  # noqa: E402  (the package path is resolved above)
+    return targets_dir, press_targets
+
+
 def quat_to_matrix(q):
     x, y, z, w = q
     return np.array([
@@ -128,19 +137,9 @@ def quat_to_matrix(q):
 
 
 def matrix_to_quat(m):
-    trace = np.trace(m)
-    if trace > 0.0:
-        s = math.sqrt(trace + 1.0) * 2.0
-        return ((m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s,
-                (m[1, 0] - m[0, 1]) / s, 0.25 * s)
-    i = int(np.argmax(np.diag(m)))
-    j, k = (i + 1) % 3, (i + 2) % 3
-    s = math.sqrt(1.0 + m[i, i] - m[j, j] - m[k, k]) * 2.0
-    out = [0.0, 0.0, 0.0, 0.25 * s]
-    out[i] = 0.25 * s
-    out[j] = (m[j, i] + m[i, j]) / s
-    out[k] = (m[k, i] + m[i, k]) / s
-    return tuple(out)
+    """Delegate rotation conversion to the shared, regression-tested helper."""
+    _, press_targets = load_press_targets_module()
+    return press_targets.quaternion_from_matrix(m)
 
 
 def frame_from_axis(axis):
@@ -234,6 +233,9 @@ def main():
                              "包的位置推出来）")
     parser.add_argument("--publish", action="store_true",
                         help="真的发到 /press/target_pose。不给就只算不发。")
+    parser.add_argument("--plan-only", action="store_true",
+                        help="发布给 execute=false 的任务节点做 IK/MTC 干规划；"
+                             "发布行为相同，但明确不应产生机械臂运动。")
     parser.add_argument("--repeats", type=int, default=3,
                         help="发布重复几次，防止 DDS 发现没完成时首条被丢")
     args = parser.parse_args()
@@ -247,9 +249,7 @@ def main():
     press_axis = np.array([0.0, 0.0, -1.0])
     button_label = "板心（板系原点）"
     if args.button:
-        targets_dir = find_press_targets_dir()
-        sys.path.insert(0, targets_dir)
-        import press_targets  # noqa: E402  （路径上一步才拼出来）
+        targets_dir, press_targets = load_press_targets_module()
 
         config_path = args.board_config or os.path.normpath(
             os.path.join(targets_dir, os.pardir, "config", "board.yaml"))
@@ -393,7 +393,7 @@ def main():
                 and np.all(target <= np.array(WORKSPACE_MAX))):
             raise SystemExit("★ 目标在工作空间盒外，任务会拒收，不发")
 
-        if not args.publish:
+        if not (args.publish or args.plan_only):
             print("\n（没给 --publish，只算不发）")
             return
 
@@ -417,7 +417,11 @@ def main():
             aim.publisher.publish(msg)
             rclpy.spin_once(aim, timeout_sec=0.05)
             time.sleep(0.15)
-        print(f"已发布（重复 {args.repeats} 次）—— 机械臂马上就要动了")
+        if args.plan_only:
+            print(f"已发布（重复 {args.repeats} 次）—— 仅供 IK/MTC 干规划，"
+                  "execute=false，不发送控制轨迹")
+        else:
+            print(f"已发布（重复 {args.repeats} 次）—— 机械臂马上就要动了")
     except KeyboardInterrupt:
         pass
     finally:

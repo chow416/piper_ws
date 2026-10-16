@@ -5,9 +5,9 @@
 #   终端 3（常驻）  tools/press_board.sh --serve [--live] [--no-view]
 #                   = 感知 marker_locator + 按压任务，来一条目标按一次
 #                     顺手把调试图转发到 http://127.0.0.1:8098/ 供观察
-#   终端 4          tools/press_board.sh [--live] [--button NAME] [--offset-mm a,b,c]
+#   终端 4          tools/press_board.sh [--live|--plan] [--button NAME] [--offset-mm a,b,c]
 #                   = 瞄准板中心（或 board.yaml 里量好的某个按键）先看一眼；
-#                     加 --live 才真发
+#                     --live 发给实机任务；--plan 只发给 execute=false 的干规划任务
 #   任意            tools/press_board.sh --check     # 只做前提检查
 #                   tools/press_board.sh --down      # 清理（含 move_group）
 #
@@ -21,6 +21,7 @@
 set -uo pipefail
 
 LIVE=0
+PLAN=0
 SERVE=0
 DOWN=0
 CHECK=0
@@ -45,6 +46,8 @@ WS_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 while [ $# -gt 0 ]; do
   case "$1" in
     --live)      LIVE=1 ;;
+    # 发布目标给 execute=false 的任务节点，让 IK/MTC 真正跑完，但绝不执行轨迹。
+    --plan)      PLAN=1 ;;
     --serve)     SERVE=1 ;;
     --down)      DOWN=1 ;;
     --check)     CHECK=1 ;;
@@ -246,6 +249,18 @@ else
   echo "  bringup 在跑（电机使能中）"
 fi
 
+# 只看进程和 can0 的 UP 标志会漏掉一种危险的“假在线”：USB-CAN 卡住后
+# 网卡仍是 UP，ros2_control_node 也仍在，但 RX 计数不再增长，PiperSystem
+# 已因反馈超时退回 unconfigured。此时轨迹控制器仍可能按时间返回
+# success，实机却完全不动。直接运行源码中的自检，这样修正脚本后不必
+# 等 colcon build 才能保护下一次实机运行。
+if ! dc "python3 src/Piper_ros/src/piper_elevator_manipulation/scripts/preflight_check.py --skip-topic-check"; then
+  echo "  控制链 ✗ CAN 实时反馈或 PiperSystem 状态不正常"
+  bad=1
+else
+  echo "  控制链 CAN 有实时反馈，PiperSystem active"
+fi
+
   return $bad
 }
 
@@ -302,6 +317,7 @@ press_params_mm() {
     }
     /^[a-z_]+:/ {
       name = $1; value = $2; gsub(/[ \t]/, "", value)
+      if (!(name in hint)) next
       if (value + 0 <= 0) next
       printf "    %-20s = %7.2f mm   %s\n", name, value * 1000, hint[name]
     }
@@ -512,13 +528,26 @@ elif [ "$LIVE" != "1" ] && [ "$task_exec" = "True" ]; then
   echo "  （任务是实机模式，但这里没加 --live —— 所以只算不发）"
 fi
 
+if [ "$PLAN" = "1" ] && [ "$task_exec" != "False" ]; then
+  echo
+  echo "  ★ --plan 只允许连接 execute=False 的任务节点；当前 execute=$task_exec。"
+  echo "    拒绝发布，避免把干规划误接到实机执行节点。"
+  exit 1
+fi
+
 # ⚠️ 先数一遍「Press N finished」有几条。等结果时**必须**比这个数更大才算这一轮
 # 跑完 —— 光 `grep -q` 的话，第二次按压之后那个循环会立刻命中**上一轮**留下的旧日志，
 # 于是「执行中」瞬间结束、打印出来的是上一轮的结果（实测踩到，很容易看漏）。
 pressed_before=$(dc "grep -c 'Press .* finished' /tmp/press.log" 2>/dev/null)
 pressed_before=${pressed_before:-0}
 
-if [ "$LIVE" = "1" ]; then PUB="--publish"; else PUB=""; fi
+if [ "$LIVE" = "1" ]; then
+  PUB="--publish"
+elif [ "$PLAN" = "1" ]; then
+  PUB="--plan-only"
+else
+  PUB=""
+fi
 # ⚠️ 这里必须把 --button 一起透传下去。只加在 demo.sh 里是不够的 —— demo.sh 是
 # 通过本脚本去调瞄准脚本的，漏了这一层就是「不认识的参数：--button」。
 if [ -n "$BUTTON" ]; then BUTTON_ARG="--button $BUTTON"; else BUTTON_ARG=""; fi
@@ -529,16 +558,20 @@ if [ "$aim_rc" != "0" ]; then
   echo; echo "★ 瞄准脚本退出码 $aim_rc —— 没有发目标。"; exit $aim_rc
 fi
 
-if [ "$LIVE" != "1" ]; then
+if [ "$LIVE" != "1" ] && [ "$PLAN" != "1" ]; then
   echo
   echo "════ 只算不发（--dry）════ 什么都没动。不加 --dry 就是实机。"
   exit 0
 fi
 
 # ---------------------------------------------------------------- 等结果
-if [ "$LIVE" = "1" ]; then
+if [ "$LIVE" = "1" ] || [ "$PLAN" = "1" ]; then
   echo
-  echo "════ 执行中 ════"
+  if [ "$PLAN" = "1" ]; then
+    echo "════ 干规划中 ════"
+  else
+    echo "════ 执行中 ════"
+  fi
   done_now=0
   for i in $(seq 1 60); do
     done_now=$(dc "grep -c 'Press .* finished' /tmp/press.log" 2>/dev/null)
@@ -557,4 +590,7 @@ if [ "$LIVE" = "1" ]; then
     | sed 's/^/  → /'
   echo
   echo "  ⚠️ 这行是**控制器跟踪误差**，不是标定误差。落点准不准要看板上的压痕。"
+  if [ "$PLAN" = "1" ]; then
+    echo "  ✓ 干规划完成：目标已进入任务节点，IK/MTC 已运行，未发送控制轨迹。"
+  fi
 fi
